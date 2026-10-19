@@ -189,10 +189,12 @@ the GUI and its webview by default; the background daemon keeps recording.
 The GUI's tray icon also disappears. Launch Vice again to open a new window
 connected to the running daemon. **Quit Vice** still stops the daemon completely.
 
-To keep the old hide-to-tray behavior, set `close_to_tray = true` in the `[ui]`
-section below and reopen the GUI. This retains the webview and its memory while
-hidden. Without a supported tray host, closing always releases the GUI instead.
-This option is configured in the TOML file, not the live settings UI.
+To keep the old hide-to-tray behavior, enable **Close to tray** under
+**Settings > Appearance** and save (or set `close_to_tray = true` in `[ui]`
+below). The next X / in-app Minimize uses the saved choice without reopening
+the GUI. This retains the webview and its memory while hidden; use the tray's
+**Open Vice** action or launch Vice again to restore it. Without a supported
+tray host, closing always releases the GUI instead.
 
 ```toml
 [recording]
