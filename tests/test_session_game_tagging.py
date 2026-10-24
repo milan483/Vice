@@ -17,7 +17,7 @@ from vice.config import Config, DiscordCustomGame, OutputConfig
 from vice.main import ViceDaemon
 from vice.playlists import PlaylistStore, build_tag_index
 from vice.recorder import (
-    GSRRecorder, _next_session_path, filename_tag,
+    Recorder, GSRRecorder, SegmentRecorder, _next_session_path, filename_tag,
     _spawn_capture, _terminate_group,
 )
 from vice.share import ShareServer
@@ -222,19 +222,217 @@ class SessionGameTaggingTests(unittest.IsolatedAsyncioTestCase):
                             await d._start_session()
                 self.assert_cleared()
 
-    async def test_detection_exception_clears_state(self) -> None:
+    async def test_detection_exception_records_untagged_and_logs_traceback(self) -> None:
         d = self.daemon
         d._session_game = "Stale game"
-        with mock.patch.object(d, "_detect_game", side_effect=RuntimeError("detection failed")):
-            with self.assertRaises(RuntimeError):
-                await d._start_session()
+        with mock.patch.object(d, "_detect_game", side_effect=RuntimeError("detection failed")), \
+             self.assertLogs("vice", level="ERROR") as logs:
+            await d._start_session()
+        self.assertIsNotNone(logs.records[0].exc_info)
+        self.assertTrue(d._session_active)
+        self.assertIsNone(d._session_game)
+        self.assertEqual(d._session_path.name, "Vice_Session_1.mp4")
+        await d._stop_session()
         self.assert_cleared()
         # Normal adapter exceptions are already best-effort: capture continues
         # without a tag, and never inherits the previous session's identity.
         self.focus.side_effect = RuntimeError("adapter failed")
         await d._start_session()
-        self.assertEqual(d._session_path.name, "Vice_Session_1.mp4")
+        self.assertEqual(d._session_path.name, "Vice_Session_2.mp4")
         await d._stop_session()
+        self.assert_cleared()
+
+    async def test_detection_cancellation_is_not_swallowed(self) -> None:
+        d = self.daemon
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def detect(*args):
+            entered.set()
+            await release.wait()
+
+        with mock.patch("vice.main.asyncio.to_thread", side_effect=detect), \
+             mock.patch.object(d.recorder, "start_session") as start:
+            task = asyncio.create_task(d._start_session())
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            start.assert_not_called()
+        self.assert_cleared()
+
+    async def test_toggle_queued_during_start_stops_instead_of_being_lost(self) -> None:
+        d = self.daemon
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_start = d.recorder.start_session
+
+        async def slow_start(**kwargs):
+            entered.set()
+            await release.wait()
+            return await original_start(**kwargs)
+
+        with mock.patch.object(d.recorder, "start_session", side_effect=slow_start) as start, \
+             mock.patch.object(d.share, "add_clip", wraps=d.share.add_clip) as add:
+            first = asyncio.create_task(d._handle_session_toggle())
+            await entered.wait()
+            second = asyncio.create_task(d._handle_session_toggle())
+            await asyncio.sleep(0)
+            self.assertFalse(second.done())
+            release.set()
+            await asyncio.gather(first, second)
+        start.assert_awaited_once()
+        add.assert_called_once()
+        self.assert_cleared()
+
+    async def test_toggle_queued_during_stop_starts_after_finalization(self) -> None:
+        d = self.daemon
+        await d._start_session()
+        old_path = d._session_path
+        d._session_highlights = [{"time": 4}]
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def watermark(path):
+            entered.set()
+            await release.wait()
+
+        d.cfg.recording.apply_watermark = True
+        with mock.patch("vice.recorder._apply_watermark", side_effect=watermark) as stamp, \
+             mock.patch.object(d.share, "add_clip", wraps=d.share.add_clip) as add, \
+             mock.patch.object(d.recorder, "_emit", wraps=d.recorder._emit) as emit:
+            first = asyncio.create_task(d._handle_session_toggle())
+            await entered.wait()
+            second = asyncio.create_task(d._handle_session_toggle())
+            await asyncio.sleep(0)
+            self.assertFalse(second.done())
+            self.assertEqual(d._session_game, "Counter-Strike 2")
+            self.focus.return_value = {"process": "overwatch.exe", "class": "overwatch.exe"}
+            release.set()
+            await asyncio.gather(first, second)
+            stamp.assert_awaited_once_with(old_path)
+            emit.assert_called_once_with(old_path)
+            add.assert_called_once_with(old_path, game="Counter-Strike 2")
+        self.assertEqual(d._session_game, "Overwatch 2")
+        self.assertNotEqual(d._session_path, old_path)
+        self.assertEqual(d._session_highlights, [])
+        self.assertTrue((self.root / "highlights" / f"{old_path.stem}.json").exists())
+        d.cfg.recording.apply_watermark = False
+        await d._stop_session()
+
+    async def test_spawn_failure_does_not_try_to_terminate_none(self) -> None:
+        with mock.patch("vice.recorder._spawn_capture", side_effect=OSError("spawn failed")), \
+             mock.patch("vice.recorder._terminate_session_capture") as terminate, \
+             mock.patch("vice.recorder._register_capture") as register:
+            await self.daemon._start_session()
+        terminate.assert_not_called()
+        register.assert_not_called()
+        self.assertIsNone(self.daemon.recorder._session_proc)
+        self.assert_cleared()
+
+    async def test_cleanup_exception_clears_state_without_registering_clip(self) -> None:
+        d = self.daemon
+        await d._start_session()
+        d._session_highlights = [{"time": 6}]
+        with mock.patch("vice.recorder._terminate_group", side_effect=RuntimeError("cleanup failed")), \
+             mock.patch.object(d.share, "add_clip") as add:
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                await d._stop_session()
+            add.assert_not_called()
+        self.assertIsNone(d.recorder._session_proc)
+        self.assertFalse(d.recorder._session_active)
+        self.assert_cleared()
+
+    async def test_watchdog_replay_recovery_preserves_session_until_daemon_stop(self) -> None:
+        d = self.daemon
+        for cls in (GSRRecorder, SegmentRecorder):
+            with self.subTest(backend=cls.__name__):
+                # Initialize shared session state without backend hardware
+                # probes. Exercise the real backend stop in the watchdog.
+                recorder = cls.__new__(cls)
+                Recorder.__init__(recorder, d.cfg)
+                recorder._proc = recorder._watch_task = None
+                recorder._current_proc = recorder._loop_task = None
+                recorder._use_wf = False
+                recorder._build_session_cmd = d.recorder._build_session_cmd
+                recorder.on_clip_saved(d._on_clip_saved)
+                d.recorder = recorder
+                d._config_apply_lock = asyncio.Lock()
+                d._clip_lock = asyncio.Lock()
+                d._window_capture_id = None
+                await d._start_session()
+                path, proc = d._session_path, recorder._session_proc
+                d._session_highlights = [{"time": 7}]
+                restarting, finish = asyncio.Event(), asyncio.Event()
+
+                async def restart():
+                    restarting.set()
+                    await finish.wait()
+
+                with mock.patch.object(recorder, "is_healthy", return_value=False), \
+                     mock.patch.object(recorder, "last_output", return_value="replay died"), \
+                     mock.patch.object(recorder, "start", side_effect=restart), \
+                     mock.patch.object(recorder, "stop_session", wraps=recorder.stop_session) as stop_session, \
+                     mock.patch.object(d, "_output_dir_problem", return_value=None), \
+                     mock.patch.object(d, "_broadcast_status"), \
+                     mock.patch("vice.main.load_user_systemd_env", return_value=[]), \
+                     mock.patch("vice.main.time.time", return_value=100), \
+                     mock.patch("vice.main.asyncio.sleep", side_effect=[None, asyncio.CancelledError()]), \
+                     mock.patch.object(d.share, "add_clip", wraps=d.share.add_clip) as add:
+                    watchdog = asyncio.create_task(d._recorder_watchdog_loop())
+                    try:
+                        await asyncio.wait_for(restarting.wait(), timeout=5)
+                        stop_session.assert_not_called()
+                        self.assertTrue(recorder._session_active)
+                        self.assertIs(recorder._session_proc, proc)
+                        self.assertTrue(d._session_active)
+                        self.assertEqual(d._session_game, "Counter-Strike 2")
+                        self.assertEqual(d._session_highlights, [{"time": 7}])
+                        add.assert_not_called()
+                    finally:
+                        finish.set()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await watchdog
+                    await d._stop_session()
+                    stop_session.assert_awaited_once_with()
+                    add.assert_called_once_with(path, game="Counter-Strike 2")
+                self.assertEqual(d.share.playlists.game_for(path.stem), "Counter-Strike 2")
+                highlights = json.loads((self.root / "highlights" / f"{path.stem}.json").read_text())
+                self.assertEqual(highlights[0]["time"], 7)
+                self.assert_cleared()
+
+    async def test_shutdown_finalizes_active_session_before_stopping_recorder(self) -> None:
+        d = self.daemon
+        await d._start_session()
+        path = d._session_path
+        d._session_highlights = [{"time": 5}]
+        d._pending_recording_apply = True
+        for field in ("_watchdog_task", "_upgrade_task", "_update_task",
+                      "_follow_mouse_task", "_window_capture_task", "_discord_task"):
+            setattr(d, field, None)
+        d.key_overlay = mock.Mock(stop=mock.AsyncMock())
+        d.hotkeys = mock.Mock(stop=mock.AsyncMock())
+        d.share.stop = mock.AsyncMock()
+        d._clear_discord_presence = mock.AsyncMock()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def terminate(*args, **kwargs):
+            entered.set()
+            await release.wait()
+
+        with mock.patch("vice.recorder._terminate_group", side_effect=terminate), \
+             mock.patch.object(d, "_apply_live_config") as apply_config, \
+             mock.patch.object(d.recorder, "stop", new=mock.AsyncMock()) as stop, \
+             mock.patch.object(d.share, "add_clip", wraps=d.share.add_clip) as add, \
+             mock.patch("vice.main.PID_FILE", self.root / "pid"), \
+             mock.patch("vice.main.SOCKET_FILE", self.root / "socket"):
+            shutdown = asyncio.create_task(d._shutdown(mock.Mock()))
+            await entered.wait()
+            self.assertTrue(d._session_lock.locked())
+            stop.assert_not_called()
+            release.set()
+            await shutdown
+            stop.assert_awaited_once_with()
+            apply_config.assert_not_called()
+            add.assert_called_once_with(path, game="Counter-Strike 2")
+        self.assertTrue((self.root / "highlights" / f"{path.stem}.json").exists())
         self.assert_cleared()
 
     async def test_failed_or_interrupted_stop_clears_identity_and_highlights(self) -> None:
@@ -385,7 +583,7 @@ class SessionGameTaggingTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_stop_reaps_capture_before_clearing_session(self) -> None:
         await self._cancel_real_capture(during_start=False)
 
-    async def test_session_start_waits_for_recorder_replacement(self) -> None:
+    async def test_session_toggle_waits_for_recorder_replacement(self) -> None:
         d = self.daemon
         replacement = GSRRecorder(d.cfg)
         stopping = asyncio.Event()
@@ -402,7 +600,7 @@ class SessionGameTaggingTests(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(replacement, "start_session", new=mock.AsyncMock(return_value=None)) as start_session:
             restart = asyncio.create_task(d._restart_recorder_for_config())
             await stopping.wait()
-            start = asyncio.create_task(d._start_session())
+            start = asyncio.create_task(d._handle_session_toggle())
             await asyncio.sleep(0)
             start_session.assert_not_called()
             finish.set()

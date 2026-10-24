@@ -1484,6 +1484,13 @@ class ViceDaemon:
 
         server.close()
 
+        # There is no reason to restart capture for deferred settings on exit.
+        self._pending_recording_apply = False
+        try:
+            await self._stop_session()
+        except Exception:
+            log.exception("Session stop failed during shutdown")
+
         try:
             await self.recorder.stop()
         except Exception as exc:
@@ -1630,30 +1637,48 @@ class ViceDaemon:
                 }))
 
     async def _handle_session_toggle(self) -> None:
-        if self._session_active:
-            await self._stop_session()
-        else:
-            await self._start_session()
+        await self._change_session(None)
 
     async def _start_session(self) -> None:
+        await self._change_session(True)
+
+    async def _stop_session(self) -> None:
+        await self._change_session(False)
+
+    async def _change_session(self, start: Optional[bool]) -> None:
         # Serialize start/stop through finalization: a new session must not
         # replace the identity or highlights of one still being saved.
         async with self._session_lock:
-            if self._session_active:
-                return
+            if start is None:
+                start = not self._session_active
             try:
-                await self._start_session_locked()
+                if start:
+                    if not self._session_active:
+                        await self._start_session_locked()
+                elif self._session_active:
+                    await self._stop_session_locked()
             finally:
                 if not self._session_active:
                     self._session_game = None
                     self._session_path = None
                     self._session_highlights = []
 
+        # Live apply takes the config/clip locks before the session lock.
+        if (not start and self._pending_recording_apply
+                and self._recording_signature() != self._recording_sig):
+            try:
+                await self._apply_live_config()
+            except Exception as exc:
+                log.error("Deferred recording config apply failed: %s", exc)
+
     async def _start_session_locked(self) -> None:
         click.echo("[Vice] Starting session recording…", err=True)
         self._session_game = None
         self._session_highlights = []
-        self._session_game = await asyncio.to_thread(self._detect_game)
+        try:
+            self._session_game = await asyncio.to_thread(self._detect_game)
+        except Exception:
+            log.exception("Session game detection failed; recording without a game tag")
         tag = self._session_game if self.cfg.output.tag_clips_with_game else None
         path = await self.recorder.start_session(tag=tag)
         if path is None:
@@ -1671,25 +1696,6 @@ class ViceDaemon:
                     "path": str(path),
                 })
             )
-
-    async def _stop_session(self) -> None:
-        async with self._session_lock:
-            try:
-                if self._session_active:
-                    await self._stop_session_locked()
-            finally:
-                self._session_active = False
-                self._session_game = None
-                self._session_path = None
-                self._session_highlights = []
-
-        # Outside the session lock: live apply takes the config/clip locks and
-        # recorder replacement takes the session lock in that order.
-        if self._pending_recording_apply and self._recording_signature() != self._recording_sig:
-            try:
-                await self._apply_live_config()
-            except Exception as exc:
-                log.error("Deferred recording config apply failed: %s", exc)
 
     async def _stop_session_locked(self) -> None:
         click.echo("[Vice] Stopping session recording…", err=True)
