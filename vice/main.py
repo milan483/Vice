@@ -166,6 +166,8 @@ class ViceDaemon:
         self._clip_lock  = asyncio.Lock()
         self._clip_count = 0
         # Session recording state
+        self._session_lock = asyncio.Lock()
+        self._session_game: Optional[str] = None
         self._session_active   = False
         self._session_path:    Optional[Path] = None
         self._session_highlights: list[dict] = []  # {time, label, color}
@@ -701,11 +703,15 @@ class ViceDaemon:
 
     async def _restart_recorder_for_config(self) -> bool:
         """Restart recorder without running two capture processes at once."""
-        if self._session_active:
+        if self._session_active or self._session_lock.locked():
             self._pending_recording_apply = True
             log.info("Recording config changed during active session; applying after session ends")
             return False
 
+        async with self._session_lock:
+            return await self._restart_recorder_for_config_locked()
+
+    async def _restart_recorder_for_config_locked(self) -> bool:
         old_recorder = self.recorder
         # Snapshot config before live-apply mutates recorder behavior.
         old_cfg = copy.deepcopy(self.cfg)
@@ -1199,15 +1205,14 @@ class ViceDaemon:
             self._discord_current_pid = 0
             self._discord_game_comm = ""
 
-    def _clip_game_tag(self) -> Optional[str]:
-        """Focused game name for clip filename tagging, or None.
+    def _detect_game(self) -> Optional[str]:
+        """Recognized raw game name, independent of filename/playlist toggles.
 
-        Sync (the recorder runs it in a thread, window detection shells
-        out to the compositor). Detection only matches the curated games
-        list, so arbitrary window titles never end up in filenames.
+        Sync (callers run it in a thread; window detection shells out to the
+        compositor). Matches configured, bundled or Steam games, never
+        arbitrary window titles.
 
-        Detection always runs so auto playlists work even with filename
-        tagging turned off; the tag itself is only returned when enabled.
+        Shared by replays and sessions; callers own their captured identity.
         """
         game = None
         win = None
@@ -1232,7 +1237,7 @@ class ViceDaemon:
                     game, win = hit
         except Exception:
             log.debug("Game detection for clip tagging failed", exc_info=True)
-        # One line per clip so an unmatched game or a compositor miss is
+        # One line per detection so an unmatched game or a compositor miss is
         # diagnosable from vice.log. A focused window with no match means the
         # game is not on the curated list; adapter=none means the session never
         # gave Vice a way to look, which is a different problem (#176). Local
@@ -1242,6 +1247,11 @@ class ViceDaemon:
             adapter, (win or {}).get("process"), (win or {}).get("class"),
             game, scanned, candidates,
         )
+        return game
+
+    def _clip_game_tag(self) -> Optional[str]:
+        """Capture replay identity even when filename tagging is disabled."""
+        game = self._detect_game()
         self._last_clip_game = game
         if not getattr(self.cfg.output, "tag_clips_with_game", False):
             return None
@@ -1626,9 +1636,26 @@ class ViceDaemon:
             await self._start_session()
 
     async def _start_session(self) -> None:
+        # Serialize start/stop through finalization: a new session must not
+        # replace the identity or highlights of one still being saved.
+        async with self._session_lock:
+            if self._session_active:
+                return
+            try:
+                await self._start_session_locked()
+            finally:
+                if not self._session_active:
+                    self._session_game = None
+                    self._session_path = None
+                    self._session_highlights = []
+
+    async def _start_session_locked(self) -> None:
         click.echo("[Vice] Starting session recording…", err=True)
+        self._session_game = None
         self._session_highlights = []
-        path = await self.recorder.start_session()
+        self._session_game = await asyncio.to_thread(self._detect_game)
+        tag = self._session_game if self.cfg.output.tag_clips_with_game else None
+        path = await self.recorder.start_session(tag=tag)
         if path is None:
             click.echo("[Vice] Session recording failed to start", err=True)
             return
@@ -1646,9 +1673,28 @@ class ViceDaemon:
             )
 
     async def _stop_session(self) -> None:
+        async with self._session_lock:
+            try:
+                if self._session_active:
+                    await self._stop_session_locked()
+            finally:
+                self._session_active = False
+                self._session_game = None
+                self._session_path = None
+                self._session_highlights = []
+
+        # Outside the session lock: live apply takes the config/clip locks and
+        # recorder replacement takes the session lock in that order.
+        if self._pending_recording_apply and self._recording_signature() != self._recording_sig:
+            try:
+                await self._apply_live_config()
+            except Exception as exc:
+                log.error("Deferred recording config apply failed: %s", exc)
+
+    async def _stop_session_locked(self) -> None:
         click.echo("[Vice] Stopping session recording…", err=True)
         self._session_active = False
-        slug_before_stop = self._session_path.stem if self._session_path else None
+        game = self._session_game
         path = await self.recorder.stop_session()
         self._session_path = None
 
@@ -1656,7 +1702,7 @@ class ViceDaemon:
                                self.cfg.notifications.session_end_sound)
         if path and self.share:
             slug = path.stem
-            url  = self.share.add_clip(path)
+            url  = self.share.add_clip(path, game=game)
             click.echo(f"[Vice] Session clip saved: {path}", err=True)
             click.echo(f"[Vice] Share URL: {url}", err=True)
             # Persist the highlights that were collected during the session
@@ -1680,13 +1726,6 @@ class ViceDaemon:
                     "type": "session_stop",
                 })
             )
-
-        # Apply deferred recording config changes after session ends.
-        if self._pending_recording_apply and self._recording_signature() != self._recording_sig:
-            try:
-                await self._apply_live_config()
-            except Exception as exc:
-                log.error("Deferred recording config apply failed: %s", exc)
 
     async def _handle_ipc(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
