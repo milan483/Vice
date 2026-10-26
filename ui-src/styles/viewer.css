@@ -1,4 +1,4 @@
-/* Viewer modal, the player bar under it, highlights and the trim modal. */
+/* Shared image viewer, clip playback controls, highlights and trim modal. */
 
 /* The scrim lays the modal and its bar out as one column, so the bar inherits
    the modal's width and centring instead of measuring them. */
@@ -102,69 +102,6 @@
   outline-offset: 2px;
 }
 
-/* ── stage ──────────────────────────────────────────────────────── */
-
-.viewer-stage {
-  position: relative;
-  margin: 0 var(--spacing-4);
-  border-radius: var(--radius-element);
-  overflow: hidden;
-  background: #000;
-  aspect-ratio: 16 / 9;
-  cursor: pointer;
-}
-
-.viewer-video {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: contain;
-}
-
-.viewer-play {
-  position: absolute;
-  inset: 0;
-  margin: auto;
-  width: 62px;
-  height: 62px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  cursor: pointer;
-  opacity: 0;
-  transform: scale(0.85);
-  pointer-events: none;
-  transition:
-    opacity var(--duration-medium) var(--ease-standard),
-    transform var(--duration-medium) var(--vice-ease-spring);
-}
-
-.viewer-play svg {
-  width: 24px;
-  height: 24px;
-}
-
-/* Visible while paused, and on hover so the target is findable either way. */
-.viewer-play[data-paused],
-.viewer-stage:hover .viewer-play {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.viewer-timebadge {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  padding: 4px 9px;
-  border-radius: var(--radius-full);
-  background: rgba(0, 0, 0, 0.62);
-  color: #fff;
-  font-size: 11px;
-}
-
 .video-overlay {
   position: absolute;
   inset: 0;
@@ -216,55 +153,6 @@
   gap: var(--spacing-3);
   padding: var(--spacing-3) var(--spacing-4) var(--spacing-4);
   min-height: 0;
-}
-
-.viewer-timeline {
-  position: relative;
-  height: 8px;
-  border-radius: var(--radius-full);
-  background: var(--vice-surface-low);
-  cursor: pointer;
-}
-
-.viewer-progress {
-  position: absolute;
-  inset: 0 auto 0 0;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-}
-
-.viewer-playhead {
-  position: absolute;
-  top: 50%;
-  width: 13px;
-  height: 13px;
-  margin-left: -6.5px;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-  transform: translateY(-50%);
-  pointer-events: none;
-}
-
-.hl-marker {
-  position: absolute;
-  top: -4px;
-  width: 5px;
-  height: 16px;
-  margin-left: -2.5px;
-  padding: 0;
-  border: none;
-  border-radius: 3px;
-  cursor: grab;
-  transition: transform var(--duration-fast) var(--ease-standard);
-}
-
-.hl-marker:hover {
-  transform: scaleY(1.25);
-}
-
-.hl-marker[data-dragging] {
-  cursor: grabbing;
-  transform: scaleY(1.4);
 }
 
 .viewer-hl-head {
@@ -435,71 +323,7 @@ kbd {
   font-size: 12.5px;
 }
 
-/* ── player bar ─────────────────────────────────────────────────── */
-
-.player-bar {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-4);
-  padding: 10px var(--spacing-3);
-  border-radius: var(--radius-container);
-  background: var(--color-background-popover);
-  box-shadow: var(--shadow-high);
-  animation: player-in var(--duration-medium) var(--vice-ease-spring);
-}
-
-@keyframes player-in {
-  from {
-    opacity: 0;
-    transform: translateY(26px);
-  }
-}
-
-.player-clip {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-2);
-  width: 210px;
-  min-width: 0;
-}
-
-.player-clip img,
-.player-thumb-empty {
-  flex: none;
-  width: 46px;
-  height: 26px;
-  border-radius: 7px;
-  object-fit: cover;
-  background: var(--vice-surface-low);
-}
-
-.player-titles {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.player-titles b {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.player-titles span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--color-text-disabled);
-}
-
-.player-controls {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
+/* Shared transport buttons and volume slider. */
 
 .player-btn {
   width: 30px;
@@ -547,64 +371,11 @@ kbd {
   transform: scale(0.94);
 }
 
-/* Was the scrub region. The modal's own timeline is the only playhead now,
-   so this width carries the readout and the level instead (#174). */
-.player-audio {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-3);
-  min-width: 0;
-}
-
 .player-volume {
   display: flex;
   align-items: center;
   gap: var(--spacing-2);
   flex: none;
-}
-
-
-.player-tc {
-  flex: none;
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.player-track {
-  position: relative;
-  flex: 1;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--control);
-  cursor: pointer;
-}
-
-.player-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-}
-
-.player-knob {
-  position: absolute;
-  top: 50%;
-  width: 11px;
-  height: 11px;
-  margin-left: -5.5px;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-  transform: translateY(-50%);
-  pointer-events: none;
-}
-
-.player-extra {
-  display: flex;
-  align-items: center;
-  gap: 2px;
 }
 
 .player-volume {
@@ -686,16 +457,6 @@ kbd {
 .player-volume-range:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 3px;
-}
-
-@media (max-width: 720px) {
-  .player-clip {
-    display: none;
-  }
-
-  .player-volume-range {
-    display: none;
-  }
 }
 
 /* ── trim ───────────────────────────────────────────────────────── */
@@ -821,87 +582,6 @@ kbd {
   min-width: 0;
   font-size: 11.5px;
   color: var(--color-text-disabled);
-}
-
-/* ── expanded ───────────────────────────────────────────────────── */
-
-/* The player fills the Vice window rather than going through the Fullscreen
-   API, which QtWebEngine ships with turned off: requestFullscreen rejected
-   with "fullscreen is not supported" on the native window, which is the one
-   place this button matters (#177).
-   
-   The stage lifts out to a fixed box over the scrim, so it does not have to
-   animate from an auto height, which is not interpolable. Growing it on a
-   uniform scale is a zoom rather than a distortion, because the video is
-   object-fit: contain and keeps its own aspect either way. */
-.viewer-stage[data-expanded] {
-  position: fixed;
-  inset: 0;
-  /* Over the scrim at 60, under the context menu and the colour picker. */
-  z-index: 70;
-  margin: 0;
-  border-radius: 0;
-  aspect-ratio: auto;
-}
-
-.viewer-stage[data-expanded] .viewer-timebadge {
-  bottom: 76px;
-}
-
-/* The play button is centred on the stage, and at window size it would sit
-   right on top of the bar's left end. */
-.viewer-stage[data-expanded] .viewer-play {
-  width: 74px;
-  height: 74px;
-}
-
-/* Idle: the pointer has not moved for a few seconds. The play button is only
-   on screen because the cursor is over the stage, and at window size it always
-   is, so it never went away and sat over the middle of the clip. Paused is
-   different and keeps its button: that one is telling you why nothing is
-   moving. */
-.viewer-stage[data-idle] {
-  cursor: none;
-}
-
-.viewer-stage[data-idle]:hover .viewer-play:not([data-paused]) {
-  opacity: 0;
-  transform: scale(0.85);
-}
-
-.viewer-stage[data-idle] .viewer-expanded-bar {
-  opacity: 0;
-  transform: translateY(10px);
-  pointer-events: none;
-}
-
-.viewer-expanded-bar {
-  position: absolute;
-  left: var(--spacing-4);
-  right: var(--spacing-4);
-  bottom: var(--spacing-4);
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-3);
-  padding: var(--spacing-2) var(--spacing-3);
-  border-radius: var(--radius-element);
-  background: var(--color-background-popover);
-  cursor: default;
-  animation: bar-rise var(--duration-medium) var(--ease-standard);
-  transition:
-    opacity var(--duration-medium) var(--ease-standard),
-    transform var(--duration-medium) var(--ease-standard);
-}
-
-@keyframes bar-rise {
-  from {
-    transform: translateY(12px);
-    opacity: 0;
-  }
-}
-
-.viewer-expanded-bar .player-tc {
-  color: var(--color-text-primary);
 }
 
 /* ── trim heading ───────────────────────────────────────────────── */
@@ -1088,10 +768,6 @@ kbd {
   pointer-events: none;
 }
 
-.viewer-stage[data-expanded] .key-overlay {
-  width: min(320px, 26%);
-}
-
 .key-overlay-row {
   display: grid;
   grid-template-columns: repeat(11, 1fr);
@@ -1121,4 +797,411 @@ kbd {
   color: var(--color-on-accent);
   border-radius: 7px;
   transform: scale(0.94);
+}
+
+/* Normal clip viewer: one transport, retained through window and monitor modes. */
+.watch-scrim {
+  padding: 24px;
+}
+.watch-shell {
+  width: min(1120px, 100%);
+  height: min(840px, calc(100dvh - 48px));
+  max-height: 100%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  outline: none;
+  border-radius: var(--radius-container);
+  background: var(--color-background-popover);
+  box-shadow: var(--shadow-high);
+}
+.watch-heading {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  flex: none;
+  z-index: 2;
+}
+.watch-heading .modal-close {
+  flex: none;
+}
+.watch-stage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #000;
+  overflow: hidden;
+}
+.watch-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.watch-center-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+}
+.watch-center-play svg {
+  width: 26px;
+  height: 26px;
+}
+.watch-control-area {
+  flex: none;
+  position: relative;
+  z-index: 3;
+  background: var(--color-background-popover);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+.watch-controls {
+  padding: 6px 16px 12px;
+}
+.watch-seek {
+  position: relative;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  touch-action: none;
+}
+.watch-seek-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--color-overlay-hover);
+  pointer-events: none;
+}
+.watch-seek-track > div {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+}
+.watch-seek input {
+  position: relative;
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+  z-index: 1;
+}
+.watch-seek input::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 4px;
+}
+.watch-seek input::-moz-range-track {
+  background: transparent;
+  height: 4px;
+}
+.watch-seek input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--color-accent);
+}
+.watch-seek input::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--color-accent);
+}
+.watch-marker {
+  position: absolute;
+  top: 4px;
+  width: 7px;
+  height: 16px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 3px;
+  padding: 0;
+  cursor: ew-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.watch-seek-preview {
+  position: absolute;
+  bottom: 29px;
+  transform: translateX(-50%);
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--color-background-popover);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  pointer-events: none;
+  box-shadow: var(--shadow-high);
+}
+.watch-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.watch-time {
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+.watch-spacer {
+  flex: 1;
+  min-width: 4px;
+}
+.watch-select {
+  color: var(--color-text-primary);
+  background: var(--color-overlay-hover);
+  border: 0;
+  border-radius: 7px;
+  padding: 6px;
+  font: inherit;
+  font-size: 12px;
+  max-width: 130px;
+  cursor: pointer;
+}
+.watch-select option {
+  background: Menu;
+  color: MenuText;
+}
+.watch-transport .player-btn {
+  flex: none;
+}
+.watch-transport .player-main {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+.watch-transport .player-volume-range {
+  width: 68px;
+}
+.watch-shell button:focus-visible,
+.watch-shell input:focus-visible,
+.watch-shell select:focus-visible,
+.watch-shell [tabindex='0']:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+.watch-shell [aria-pressed='true'],
+.watch-shell [aria-expanded='true'] {
+  color: var(--color-accent);
+}
+.watch-shell[data-immersive],
+.watch-shell:fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  z-index: 70;
+  background: #000;
+}
+.watch-shell[data-immersive] .watch-heading {
+  position: absolute;
+  inset: 0 0 auto;
+  color: #fff;
+  background: linear-gradient(rgba(0, 0, 0, 0.8), transparent);
+  padding-bottom: 36px;
+  transition: opacity 180ms ease;
+}
+.watch-shell[data-immersive] .watch-heading h2 {
+  color: #fff;
+}
+.watch-shell[data-immersive] .watch-heading p {
+  color: #ccc;
+}
+.watch-shell[data-immersive] .watch-control-area {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 16px;
+  border-radius: var(--radius-element);
+  background: color-mix(in srgb, var(--color-background-popover) 94%, transparent);
+}
+.watch-shell[data-idle] .watch-control-area {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+.watch-shell[data-idle] .watch-heading {
+  opacity: 0;
+  pointer-events: none;
+}
+.watch-shell[data-idle] .watch-stage {
+  cursor: none;
+}
+.watch-panel,
+.watch-menu {
+  position: absolute;
+  z-index: 4;
+  right: 16px;
+  bottom: 100px;
+  max-height: calc(100% - 180px);
+  overflow: auto;
+  padding: 18px;
+  border-radius: var(--radius-element);
+  background: var(--color-background-popover);
+  box-shadow: var(--shadow-high);
+  border: 1px solid var(--color-overlay-hover);
+  color: var(--color-text-primary);
+}
+.watch-panel {
+  width: min(340px, calc(100% - 32px));
+}
+.watch-panel .viewer-hl-head {
+  padding: 8px 24px 12px 0;
+}
+.watch-panel .viewer-hl-list {
+  max-height: none;
+  padding: 0;
+}
+.watch-panel-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+.watch-menu {
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+}
+.watch-menu > button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.watch-menu > button:hover {
+  background: var(--color-overlay-hover);
+}
+.watch-menu > button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.watch-menu > .watch-delete {
+  color: var(--color-error, #ef7272);
+}
+.watch-help h3 {
+  margin: 0 0 18px;
+  font-size: 14px;
+}
+.watch-help dl {
+  margin: 0;
+  font-size: 12px;
+}
+.watch-help dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 10px 0;
+}
+.watch-help dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  text-align: right;
+}
+.watch-stage .key-overlay {
+  bottom: 20px;
+}
+.watch-shell[data-immersive] .key-overlay {
+  bottom: 124px;
+  width: min(320px, 26%);
+}
+.watch-shell[data-closing] {
+  pointer-events: none;
+}
+@media (max-width: 900px) {
+  .watch-transport {
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .watch-spacer {
+    flex-basis: 4px;
+  }
+  .watch-time {
+    margin-right: auto;
+  }
+  .watch-transport .player-volume-range {
+    width: 50px;
+  }
+  .watch-shell[data-immersive] .watch-control-area {
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+  }
+}
+@media (max-width: 560px) {
+  .watch-scrim {
+    padding: 8px;
+  }
+  .watch-shell {
+    height: calc(100dvh - 16px);
+  }
+  .watch-controls {
+    padding: 4px 10px 10px;
+  }
+  .watch-heading {
+    padding: 12px;
+  }
+  .watch-transport .player-volume-range {
+    width: 40px;
+  }
+  .watch-panel,
+  .watch-menu {
+    bottom: 144px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .watch-shell *,
+  .watch-shell[data-immersive] .watch-heading {
+    transition: none;
+    animation: none;
+  }
+}
+.watch-error {
+  position: absolute;
+  z-index: 6;
+  left: 20px;
+  right: 20px;
+  top: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--color-background-popover);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-high);
+  font-size: 13px;
+}
+.watch-seek-preview {
+  white-space: nowrap;
 }

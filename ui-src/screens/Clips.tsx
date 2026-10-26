@@ -21,7 +21,7 @@ export function Clips() {
     ? (playlists.find(p => p.id === currentPlaylistId) ?? null)
     : null;
 
-  const {actions, overlays} = useClipActions();
+  const {actions, overlays} = useClipActions(visibleClips);
   // A playlist holds both kinds. All Clips stays clips only, and the Images
   // section stays images only, so this is the one screen that shows a mix.
   const images = playlist ? visibleImages : [];

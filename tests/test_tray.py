@@ -252,6 +252,9 @@ class ClosePolicyConfigTests(unittest.TestCase):
 
     def test_app_wires_policy_and_normal_webview_exit_does_not_stop_daemon(self) -> None:
         webview = mock.Mock()
+        # Native fullscreen has its own real-window and unit coverage. This
+        # close-policy fixture does not implement pywebview lifecycle events.
+        self.enterContext(mock.patch.object(vice_app, "_PlayerFullscreen"))
         with mock.patch.dict("sys.modules", {"webview": webview}), mock.patch.object(
             vice_app, "_prepare_webview_environment"
         ), mock.patch.object(

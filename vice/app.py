@@ -950,6 +950,131 @@ def _close_window_after_bridge(win) -> None:
     threading.Thread(target=close, name="window-close", daemon=True).start()
 
 
+class _PlayerFullscreen:
+    """Serialize bridge requests and inspect real window state on its GUI thread."""
+
+    def __init__(self, win) -> None:
+        self._win = win
+        self._lock = threading.Lock()
+        self._dispatch = None
+        self._dispatcher = None
+        self._saved_state = None
+        self._qt = False
+        win.events.before_show += self._install
+
+    def _install(self) -> None:
+        native = self._win.native
+        self._saved_state = None
+        try:
+            from qtpy import QtCore
+            from qtpy.QtWidgets import QMainWindow
+        except ImportError:
+            QMainWindow = None
+        if QMainWindow is not None and isinstance(native, QMainWindow):
+            class Dispatcher(QtCore.QObject):
+                requested = QtCore.Signal(object)
+
+                def __init__(self):
+                    super().__init__(native)
+                    self.requested.connect(self.run)
+
+                @QtCore.Slot(object)
+                def run(self, callback):
+                    callback()
+
+            self._qt = True
+            self._dispatcher = Dispatcher()
+            self._dispatch = self._dispatcher.requested.emit
+        else:
+            from gi.repository import GLib
+            self._qt = False
+            self._dispatch = GLib.idle_add
+
+    def _state(self) -> bool:
+        native = self._win.native
+        if self._qt:
+            return bool(native.isFullScreen())
+        from gi.repository import Gdk
+        surface = native.get_window()
+        return bool(surface and surface.get_state() & Gdk.WindowState.FULLSCREEN)
+
+    def _on_gui(self, callback):
+        if self._dispatch is None:
+            raise RuntimeError("Native fullscreen is not ready")
+        done = threading.Event()
+        result = []
+        failure = []
+
+        def run():
+            # A stalled GUI must not execute a request after we report failure.
+            if done.is_set():
+                return False
+            try:
+                result.append(callback())
+            except Exception as exc:
+                failure.append(exc)
+            finally:
+                done.set()
+            return False
+
+        self._dispatch(run)
+        if not done.wait(3):
+            done.set()
+            raise RuntimeError("Native fullscreen request timed out")
+        if failure:
+            raise failure[0]
+        return result[0]
+
+    def get(self) -> bool:
+        def read():
+            active = self._state()
+            if not active and self._qt and self._saved_state is not None:
+                self._win.native.setWindowState(self._saved_state)
+                self._saved_state = None
+            return active
+
+        with self._lock:
+            return self._on_gui(read)
+
+    def set(self, enabled: bool) -> bool:
+        if not isinstance(enabled, bool):
+            raise ValueError("Fullscreen state must be a boolean")
+
+        def apply():
+            native = self._win.native
+            actual = self._state()
+            if actual == enabled:
+                if not enabled and self._qt and self._saved_state is not None:
+                    native.setWindowState(self._saved_state)
+                    self._saved_state = None
+                return
+            if self._qt:
+                if enabled:
+                    self._saved_state = native.windowState()
+                # pywebview's flag can become stale after a window-manager exit.
+                native.is_fullscreen = actual
+                self._win.toggle_fullscreen()
+                if not enabled and self._saved_state is not None:
+                    native.setWindowState(self._saved_state)
+                    self._saved_state = None
+            else:
+                # The public GTK toggle queues another idle callback; operate on
+                # its backend here so requests remain ordered on the GUI thread.
+                backend = self._win.gui.BrowserView.instances[self._win.uid]
+                backend.is_fullscreen = actual
+                backend.toggle_fullscreen()
+
+        with self._lock:
+            self._on_gui(apply)
+            # The window manager acknowledges GTK requests asynchronously.
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if self._on_gui(self._state) == enabled:
+                    return enabled
+                time.sleep(0.02)
+            raise RuntimeError("The window manager did not change fullscreen state")
+
+
 def _run_webview(url: str) -> None:
     _prepare_webview_environment()
     import webview  # type: ignore[import]
@@ -960,9 +1085,21 @@ def _run_webview(url: str) -> None:
         def __init__(self) -> None:
             self._win: webview.Window | None = None
             self._tray_controller: WindowTrayController | None = None
+            self._fullscreen: _PlayerFullscreen | None = None
 
         def _bind(self, win: "webview.Window") -> None:
             self._win = win
+            self._fullscreen = _PlayerFullscreen(win)
+
+        def set_player_fullscreen(self, enabled: bool) -> bool:
+            if self._fullscreen is None:
+                raise RuntimeError("Native fullscreen is not ready")
+            return self._fullscreen.set(enabled)
+
+        def get_player_fullscreen(self) -> bool:
+            if self._fullscreen is None:
+                raise RuntimeError("Native fullscreen is not ready")
+            return self._fullscreen.get()
 
         def _bind_tray(self, controller: WindowTrayController) -> None:
             self._tray_controller = controller

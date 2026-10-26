@@ -48,7 +48,6 @@ export function Home() {
   const {state, dispatch, hotkey, saveConfig, notify} = useStore();
   const {clips, playlists, config, tunnelUrl, recentNew, status} = state;
 
-  const {actions, overlays} = useClipActions();
   const layout = useHomeLayout();
   const [busy, setBusy] = useState<string | null>(null);
   const [manualCopy, setManualCopy] = useState<string | null>(null);
@@ -73,6 +72,9 @@ export function Home() {
         .slice(0, ROW_LIMIT),
     [clips],
   );
+
+  const {actions: recentActions, overlays: recentOverlays} = useClipActions(recent);
+  const {actions: mostViewedActions, overlays: mostViewedOverlays} = useClipActions(mostViewed);
 
   /**
    * wf-recorder cannot mix a microphone in without being told how, so asking
@@ -315,7 +317,7 @@ export function Home() {
         action={{label: t('home.seeAll'), onClick: () => dispatch({type: 'setView', view: 'clips', playlistId: null})}}
         clips={recent}
         recentNew={recentNew}
-        actions={actions}
+        actions={recentActions}
         empty={t('home.emptyReel', {hotkey})}
       />
 
@@ -345,11 +347,12 @@ export function Home() {
       ) : null}
 
       {mostViewed.length > 0 ? (
-        <ClipRow title={t('home.mostViewed')} clips={mostViewed} recentNew={recentNew} actions={actions} />
+        <ClipRow title={t('home.mostViewed')} clips={mostViewed} recentNew={recentNew} actions={mostViewedActions} />
       ) : null}
 
       <OverlayPortal>
-        {overlays}
+        {recentOverlays}
+        {mostViewedOverlays}
 
         <Modal
           open={wfMicPrompt}

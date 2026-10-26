@@ -1,5 +1,4 @@
 import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
-
 import {api} from '../lib/api';
 import {useEscape} from '../lib/escape';
 import {DEFAULT_MARK_COLOR, MARK_COLORS} from '../lib/palette';
@@ -9,34 +8,38 @@ import {
   clipNeedsProxy,
   playQuietly,
   playbackUrl,
-  seekTo,
   useVideoFailure,
   videoFailureMessage,
 } from '../lib/playback';
+import {
+  getPlayerFullscreen,
+  requestPlayerFullscreen,
+  subscribePlayerFullscreen,
+} from '../lib/fullscreen';
 import {clipTitle, imageTitle, type Clip, type Highlight} from '../lib/types';
-import {IconClose, IconExpand} from './Icons';
+import {IconClose} from './Icons';
 import {KeyOverlay} from './KeyOverlay';
 import type {KeyInterval} from '../lib/keyLayout';
 import {InlineRename} from './InlineRename';
+import {ViewerControls, PLAYBACK_SPEEDS, type EndBehavior} from './ViewerControls';
 import {t, tNode} from '../lib/i18n';
 
-/** Cycled by index as highlights are added, so a clip's marks stay distinct. */
 const HIGHLIGHT_COLORS = MARK_COLORS;
-
 const DEFAULT_HIGHLIGHT_COLOR = DEFAULT_MARK_COLOR;
 
+export type HighlightUpdate = Highlight[] | ((current: Highlight[]) => Highlight[]);
+
 export interface ViewerProps {
-  /** The clip on screen, or null when the viewer is closed. */
   clip: Clip | null;
-  /** Every clip, in order, which is what prev and next walk. */
+  /** The snapshotted originating queue, resolved against live library metadata. */
   clips: Clip[];
   highlights: Highlight[];
-  onHighlightsChange: (next: Highlight[]) => void;
+  onHighlightsChange: (next: HighlightUpdate) => void;
   onSelect: (slug: string) => void;
   onClose: () => void;
   onTrim: (clip: Clip) => void;
-  /** True while the trim modal is open over the viewer or the player bar. */
   trimOpen: boolean;
+  overlayOpen?: boolean;
   onShare: (clip: Clip) => void;
   onShareMenu: (clip: Clip) => void;
   shareLabel: string;
@@ -47,132 +50,200 @@ export interface ViewerProps {
   notify: (title: string, detail?: string, tone?: 'accent' | 'error') => void;
 }
 
-/**
- * Playback volume, remembered per viewer rather than per clip.
- *
- * localStorage rather than the daemon's config: this is a property of the
- * window you are watching in, not a recording setting, and the native window
- * cannot always write it, which is only ever a forgotten level (#174).
- */
 const VOLUME_KEY = 'vice-volume';
 const MUTED_KEY = 'vice-muted';
-
-function storedVolume(): number {
-  try {
-    const raw = Number(localStorage.getItem(VOLUME_KEY));
-    return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 1;
-  } catch {
-    return 1;
-  }
-}
-
-function storedMuted(): boolean {
-  try {
-    return localStorage.getItem(MUTED_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
+const SPEED_KEY = 'vice-playback-speed';
 const KEYS_SHOWN_KEY = 'vice-viewer-keys';
-
-/** Whether a clip's saved keys are drawn over it. On until turned off. */
-function storedKeysShown(): boolean {
+function storedNumber(key: string, fallback: number, valid: (value: number) => boolean): number {
   try {
-    return localStorage.getItem(KEYS_SHOWN_KEY) !== '0';
+    const raw = localStorage.getItem(key);
+    if (raw === null || raw.trim() === '') return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) && valid(value) ? value : fallback;
   } catch {
-    return true;
+    return fallback;
   }
 }
-
+function storedFlag(key: string, fallback: boolean): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : raw === '1';
+  } catch {
+    return fallback;
+  }
+}
 function remember(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
   } catch {
-    // A private window or a WebKit build that refuses storage. The level
-    // still applies to this session, it just does not survive a restart.
+    /* Session state still applies. */
   }
 }
+const FOCUSABLE =
+  'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]';
 
-/**
- * The viewer: one playback element, two surfaces around it.
- *
- * The modal shows the video and its highlights; the bar below carries the
- * transport and mirrors the same element. They open and close together, and
- * the bar sits in the same column as the modal so it inherits the modal's
- * width and centring rather than measuring them. The old UI floated the bar
- * separately and had to read offsetLeft rather than a client rect, because the
- * modal animates in under a scale() transform that skews a live rect; laying
- * them out together removes the measurement, and with it that whole hazard.
- */
+/** One video and one transport stay mounted across all three viewing modes. */
 export function Viewer(props: ViewerProps) {
-  const {clips, highlights, onHighlightsChange, onSelect, onClose} = props;
-
-  // The viewer is held on screen for the length of its exit so it animates
-  // away instead of vanishing between frames. props.clip is already null by
-  // then, so the last one is kept to render against; the video is stopped the
-  // moment closing starts, or it would keep playing audio behind the fade.
-  const {mounted, closing} = useExitTransition(props.clip !== null, 320);
+  const {clips, highlights, onHighlightsChange, onSelect, onClose, trimOpen} = props;
+  const open = props.clip !== null;
+  const blocked = props.overlayOpen || trimOpen;
+  const {mounted, closing} = useExitTransition(open, 320);
   const lastClip = useRef(props.clip);
   if (props.clip) lastClip.current = props.clip;
   const clip = props.clip ?? lastClip.current;
-
   const videoRef = useRef<HTMLVideoElement>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({current: 0, duration: 0});
   const [paused, setPaused] = useState(true);
   const [preparing, setPreparing] = useState(false);
   const [dragging, setDragging] = useState<string | null>(null);
-  const [picker, setPicker] = useState<{id: string; color: string; at: {x: number; y: number}} | null>(
-    null,
-  );
+  const [picker, setPicker] = useState<{
+    id: string;
+    color: string;
+    at: {x: number; y: number};
+  } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState(false);
-  const [volume, setVolume] = useState(storedVolume);
-  const [muted, setMuted] = useState(storedMuted);
+  const [volume, setVolume] = useState(() => storedNumber(VOLUME_KEY, 1, n => n >= 0 && n <= 1));
+  const [muted, setMuted] = useState(() => storedFlag(MUTED_KEY, false));
+  const [speed, setSpeed] = useState(() =>
+    storedNumber(SPEED_KEY, 1, n => PLAYBACK_SPEEDS.includes(n)),
+  );
+  const [endBehavior, setEndBehavior] = useState<EndBehavior>('stop');
   const [expanded, setExpanded] = useState(false);
+  const [fullscreen, setFullscreen] = useState(getPlayerFullscreen);
+  const [fullscreenBusy, setFullscreenBusy] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState<string | null>(null);
+  const fullscreenPending = useRef(false);
+  const fullscreenTransition = useRef<Promise<boolean> | null>(null);
   const [idle, setIdle] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [grabbing, setGrabbing] = useState(false);
-  const failed = useVideoFailure(videoRef, mounted);
-  const [keysShown, setKeysShown] = useState(storedKeysShown);
+  const [keysShown, setKeysShown] = useState(() => storedFlag(KEYS_SHOWN_KEY, true));
   const [keyIntervals, setKeyIntervals] = useState<KeyInterval[] | null>(null);
-
+  const failed = useVideoFailure(videoRef, mounted);
+  const immersive = expanded || fullscreen;
   const index = clip ? clips.findIndex(c => c.slug === clip.slug) : -1;
-  const open = props.clip !== null;
+  const clickTimer = useRef<number | undefined>(undefined);
+  const clickIntent = useRef<{
+    slug: string | undefined;
+    wasPaused: boolean;
+    applied: boolean;
+  } | null>(null);
+  const dragCleanup = useRef<(() => void) | null>(null);
+  const liveClip = useRef(clip?.slug);
+  liveClip.current = clip?.slug;
 
-  // Attach the source only when it actually changes. Stepping back to the clip
-  // already loaded must not reload it, because a fresh load is what counts as
-  // a view.
-  //
-  // Nothing here starts playing while trim is open. Renaming from the trim
-  // window changes the clip's slug, which re-attaches the source, and without
-  // the guard that put this clip's audio back underneath trim's own preview of
-  // the same clip (#175).
-  //
-  // Reopening the clip that was last shown hands back the same object, so
-  // open is a dependency too: the element is new and has no source (#249).
-  const trimOpen = props.trimOpen;
+  const setFull = useCallback(
+    (enabled: boolean): Promise<boolean> => {
+      const shell = shellRef.current;
+      if (!shell) return Promise.resolve(false);
+      if (fullscreenTransition.current) {
+        return fullscreenTransition.current.then(() => setFull(enabled));
+      }
+      fullscreenPending.current = true;
+      setFullscreenBusy(true);
+      setFullscreenError(null);
+      // Call immediately so browser entry retains transient user activation.
+      const transition = requestPlayerFullscreen(shell, enabled)
+        .then(
+          () => true,
+          error => {
+            setFullscreenError((error as Error).message);
+            props.notify(t('viewer.fullscreenFailed'), (error as Error).message, 'error');
+            return false;
+          },
+        )
+        .finally(() => {
+          fullscreenPending.current = false;
+          fullscreenTransition.current = null;
+          setFullscreenBusy(false);
+        });
+      fullscreenTransition.current = transition;
+      return transition;
+    },
+    [props.notify],
+  );
+  useEffect(() => {
+    if (!mounted) return;
+    return subscribePlayerFullscreen(setFullscreen);
+  }, [mounted]);
+
+  const source = clip ? playbackUrl(clip) : '';
+  const sourceSlug = clip?.slug;
   useLayoutEffect(() => {
     const video = videoRef.current;
-    if (!open || !video || !clip) return;
-    const src = playbackUrl(clip);
-    if (video.getAttribute('src') === src) {
-      if (!trimOpen) playQuietly(video);
-      return;
-    }
+    if (!open || !video || !source) return;
+    if (video.getAttribute('src') === source) return;
     video.pause();
-    video.src = src;
+    video.src = source;
     video.load();
+    video.volume = volume;
+    video.muted = muted;
+    video.playbackRate = speed;
     setPreparing(clipNeedsProxy(clip));
     setPosition({current: 0, duration: 0});
     if (!trimOpen) playQuietly(video);
-    void api
-      .markViewed(clip.slug)
-      .catch(err => console.debug('Recording the view failed', err));
-  }, [clip, trimOpen, open]);
+    if (sourceSlug)
+      void api.markViewed(sourceSlug).catch(err => console.debug('Recording the view failed', err));
+    // Volume/rate are applied below too; changing a preference must not re-open a paused source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, sourceSlug, open]);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.volume = volume;
+      video.muted = muted;
+      video.playbackRate = speed;
+    }
+  }, [volume, muted, speed, open]);
 
-  // The keys kept beside this clip, when there are any (#209).
+  useEffect(() => {
+    if (trimOpen) videoRef.current?.pause();
+  }, [trimOpen]);
+  useEffect(() => {
+    if (open) return;
+    const video = videoRef.current;
+    if (video?.getAttribute('src')) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+    if (shellRef.current && (getPlayerFullscreen() || fullscreenPending.current)) {
+      void requestPlayerFullscreen(shellRef.current, false).catch(error =>
+        props.notify(t('viewer.fullscreenFailed'), String(error), 'error'),
+      );
+    }
+    window.clearTimeout(clickTimer.current);
+    dragCleanup.current?.();
+    setExpanded(false);
+    setEndBehavior('stop');
+    setPanelOpen(false);
+    setMenuOpen(false);
+    setHelpOpen(false);
+    setPicker(null);
+    setFullscreenError(null);
+  }, [open, props.notify]);
+  useEffect(
+    () => () => {
+      window.clearTimeout(clickTimer.current);
+      dragCleanup.current?.();
+    },
+    [],
+  );
+  useEffect(() => {
+    window.clearTimeout(clickTimer.current);
+    clickIntent.current = null;
+    setPicker(null);
+    setRenaming(null);
+    setRenamingTitle(false);
+    dragCleanup.current?.();
+  }, [sourceSlug]);
+
   const keysSlug = clip?.keys ? clip.slug : null;
   useEffect(() => {
     setKeyIntervals(null);
@@ -180,54 +251,28 @@ export function Viewer(props: ViewerProps) {
     let live = true;
     void api
       .clipKeys(keysSlug)
-      .then(keys => live && setKeyIntervals(keys ?? null))
+      .then(keys => {
+        if (live) setKeyIntervals(keys ?? null);
+      })
       .catch(err => console.debug('Loading the clip keys failed', err));
     return () => {
       live = false;
     };
   }, [keysSlug]);
 
-  // Release the decoder when the viewer goes, not merely pause it.
+  // Hide only during uninterrupted watching. Focus, hover and drag pin the bar.
   useEffect(() => {
-    if (open) return;
-    const video = videoRef.current;
-    if (!video?.getAttribute('src')) return;
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
-  }, [open]);
-
-  // Applied on every render rather than only on change: attaching a new source
-  // resets the element's own volume, so a clip stepped to at 20% would come
-  // back at full blast.
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.volume = volume;
-    video.muted = muted;
-  });
-
-  // Expanding is a layout change inside the Vice window, not the Fullscreen
-  // API. QtWebEngine ships with fullscreen support off, so requestFullscreen
-  // rejected with "fullscreen is not supported" on the native window, which is
-  // the one place this button actually matters. Growing the player to fill the
-  // window needs nothing from the host and cannot fail (#177).
-  useEffect(() => {
-    if (!open) setExpanded(false);
-  }, [open]);
-
-  /**
-   * Hide the chrome once the pointer stops moving.
-   *
-   * Only while expanded. At window size the cursor is over the video almost
-   * all the time, so the hover rule that makes the play button findable never
-   * lets go of it and it sits over the middle of the clip permanently. In the
-   * inline viewer the pointer leaves the stage on its own, so nothing there
-   * needs this and nothing there changes.
-   */
-  const IDLE_MS = 3000;
-  useEffect(() => {
-    if (!expanded) {
+    if (
+      !open ||
+      !immersive ||
+      paused ||
+      menuOpen ||
+      panelOpen ||
+      helpOpen ||
+      picker ||
+      blocked ||
+      dragging
+    ) {
       setIdle(false);
       return;
     }
@@ -235,84 +280,136 @@ export function Viewer(props: ViewerProps) {
     const wake = () => {
       setIdle(false);
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => setIdle(true), IDLE_MS);
+      timer = window.setTimeout(() => {
+        const controls = controlsRef.current;
+        const focused = document.activeElement;
+        if (
+          (focused instanceof HTMLElement &&
+            shellRef.current?.contains(focused) &&
+            focused.matches('button, input, select, textarea, a, [contenteditable]')) ||
+          controls?.matches(':hover') ||
+          shellRef.current?.querySelector('.watch-heading:hover')
+        )
+          return;
+        setIdle(true);
+      }, 3000);
     };
     wake();
-    // On the window, not the stage: a pointer moving over the bar or the play
-    // button is still the user being present.
-    window.addEventListener('pointermove', wake);
-    window.addEventListener('pointerdown', wake);
+    const shell = shellRef.current;
+    shell?.addEventListener('pointermove', wake);
+    shell?.addEventListener('pointerdown', wake);
+    shell?.addEventListener('keydown', wake);
+    shell?.addEventListener('focusin', wake);
+    shell?.addEventListener('focusout', wake);
+    shell?.addEventListener('pointerleave', wake);
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener('pointermove', wake);
-      window.removeEventListener('pointerdown', wake);
+      shell?.removeEventListener('pointermove', wake);
+      shell?.removeEventListener('pointerdown', wake);
+      shell?.removeEventListener('keydown', wake);
+      shell?.removeEventListener('focusin', wake);
+      shell?.removeEventListener('focusout', wake);
+      shell?.removeEventListener('pointerleave', wake);
     };
-  }, [expanded]);
+  }, [open, immersive, paused, menuOpen, panelOpen, helpOpen, picker, blocked, dragging]);
 
-  // The box the stage occupied before the toggle, read while it is at rest.
-  // Measuring here rather than in the layout effect is the point: by then the
-  // new layout has already been applied and the old one is gone.
-  const expandFrom = useRef<{rect: DOMRect; radius: string} | null>(null);
-  const toggleExpanded = useCallback(() => {
-    const stage = stageRef.current;
-    expandFrom.current = stage
-      ? {rect: stage.getBoundingClientRect(), radius: getComputedStyle(stage).borderTopLeftRadius}
-      : null;
-    setExpanded(on => !on);
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    shellRef.current?.focus({preventScroll: true});
+    return () => {
+      if (previous?.isConnected) previous.focus({preventScroll: true});
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!open || blocked) return;
+    const trap = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      const shell = shellRef.current;
+      if (!shell) return;
+      const candidates = [...shell.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+        el => el.getClientRects().length && !el.closest('[inert]'),
+      );
+      const first = candidates[0];
+      const last = candidates[candidates.length - 1];
+      if (!first) {
+        e.preventDefault();
+        shell.focus();
+        return;
+      }
+      if (!shell.contains(document.activeElement) || document.activeElement === shell) {
+        e.preventDefault();
+        (e.shiftKey ? last : first)?.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', trap);
+    return () => document.removeEventListener('keydown', trap);
+  }, [open, blocked]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        !target.closest('#watch-actions, [aria-controls="watch-actions"]')
+      )
+        setMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [menuOpen]);
+
+  const toggle = useCallback(() => {
+    const video = videoRef.current;
+    if (!video?.getAttribute('src')) return;
+    if (video.paused) playQuietly(video);
+    else video.pause();
   }, []);
-
-  // Both directions animate, from wherever the stage was to wherever it lands.
-  // A one-way keyframe grew it and then snapped it back, and the snap read as
-  // a glitch rather than as the same gesture reversed.
-  useLayoutEffect(() => {
-    const stage = stageRef.current;
-    const from = expandFrom.current;
-    expandFrom.current = null;
-    if (!stage || !from || typeof stage.animate !== 'function') return;
-
-    const first = from.rect;
-    const last = stage.getBoundingClientRect();
-    if (!first.width || !last.width) return;
-    const dx = first.left - last.left;
-    const dy = first.top - last.top;
-    const sx = first.width / last.width;
-    const sy = first.height / last.height;
-    // Sub-pixel differences are not a move, and animating one costs a frame.
-    if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(sx - 1) < 0.01) return;
-
-    // Radius is read off both ends rather than written in, so the corners
-    // square off on the way out and round again on the way back without this
-    // file having to know what --radius-element resolves to.
-    stage.animate(
-      [
-        {transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: from.radius},
-        {transform: 'none', borderRadius: getComputedStyle(stage).borderTopLeftRadius},
-      ],
-      {duration: 280, easing: 'cubic-bezier(0.2, 0, 0, 1)'},
-    );
-  }, [expanded]);
-
+  const seek = useCallback((seconds: number) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration)) return;
+    // Exact currentTime is appropriate for a user-chosen timestamp; fastSeek may snap to a keyframe.
+    video.currentTime = Math.max(0, Math.min(video.duration, seconds));
+    setPosition({current: video.currentTime, duration: video.duration});
+  }, []);
+  const step = useCallback(
+    (delta: number) => {
+      if (index < 0) return;
+      const next = clips[index + delta];
+      if (next) onSelect(next.slug);
+    },
+    [clips, index, onSelect],
+  );
   const applyVolume = useCallback((next: number) => {
-    // Rounded before it is stored: a pointer position divided by a track width
-    // is 0.39999999999999963, and that is what ends up in localStorage and in
-    // the element otherwise.
     const level = round3(clamp01(next));
     setVolume(level);
     remember(VOLUME_KEY, String(level));
-    // Dragging the slider up off zero is an unmute; making the user press the
-    // speaker as well would be a second gesture for one intention.
     if (level > 0) {
       setMuted(false);
       remember(MUTED_KEY, '0');
     }
   }, []);
-
-  const toggleMuted = useCallback(() => {
-    setMuted(prev => {
-      remember(MUTED_KEY, prev ? '0' : '1');
-      return !prev;
-    });
-  }, []);
+  const toggleMuted = useCallback(
+    () =>
+      setMuted(previous => {
+        remember(MUTED_KEY, previous ? '0' : '1');
+        return !previous;
+      }),
+    [],
+  );
+  const applySpeed = (next: number) => {
+    if (PLAYBACK_SPEEDS.includes(next)) {
+      setSpeed(next);
+      remember(SPEED_KEY, String(next));
+    }
+  };
 
   const saveFrame = useCallback(async () => {
     const video = videoRef.current;
@@ -331,394 +428,453 @@ export function Viewer(props: ViewerProps) {
     } finally {
       setGrabbing(false);
     }
-  }, [clip, grabbing, props]);
-
-  const step = useCallback(
-    (delta: number) => {
-      if (index < 0) return;
-      const next = clips[index + delta];
-      if (next) onSelect(next.slug);
-    },
-    [clips, index, onSelect],
-  );
-
+  }, [clip, grabbing, props.notify]);
   const addHighlight = useCallback(async () => {
     const video = videoRef.current;
-    if (!clip || !video) return;
+    if (!clip || !video || !Number.isFinite(video.duration)) return;
+    const slug = clip.slug;
     const time = video.currentTime;
     const label = nextHighlightLabel(highlights);
     const color = HIGHLIGHT_COLORS[highlights.length % HIGHLIGHT_COLORS.length];
     try {
-      const result = await api.addHighlight(clip.slug, {time, label, color});
-      if (!result.highlight) throw new Error(result.error || t('viewer.daemonNoMark'));
-      onHighlightsChange(sortHighlights([...highlights, result.highlight]));
-      props.notify(`${label} at ${formatDuration(time, true)}`, undefined, 'accent');
+      const result = await api.addHighlight(slug, {time, label, color});
+      const highlight = result.highlight;
+      if (!highlight) throw new Error(result.error || t('viewer.daemonNoMark'));
+      if (liveClip.current === slug)
+        onHighlightsChange(current => sortHighlights([...current, highlight]));
+      props.notify(`${label} · ${formatDuration(time, true)}`, undefined, 'accent');
     } catch (err) {
       props.notify(t('viewer.errAddHighlight'), (err as Error).message, 'error');
     }
-  }, [clip, highlights, onHighlightsChange, props]);
+  }, [clip, highlights, onHighlightsChange, props.notify]);
 
-  // Escape shrinks before it closes. One press doing both would take away the
-  // clip the user was watching when all they wanted was the window back.
-  useEscape(open, useCallback(() => {
-    if (expanded) {
-      setExpanded(false);
-      return;
-    }
-    onClose();
-  }, [expanded, onClose]));
-
+  useEscape(
+    open && !blocked,
+    useCallback(() => {
+      if (picker) {
+        setPicker(null);
+        return;
+      }
+      if (menuOpen) {
+        setMenuOpen(false);
+        controlsRef.current
+          ?.querySelector<HTMLButtonElement>('[aria-controls="watch-actions"]')
+          ?.focus();
+        return;
+      }
+      if (helpOpen) {
+        setHelpOpen(false);
+        return;
+      }
+      if (panelOpen) {
+        setPanelOpen(false);
+        controlsRef.current
+          ?.querySelector<HTMLButtonElement>('[aria-controls="watch-highlights"]')
+          ?.focus();
+        return;
+      }
+      if (fullscreen) {
+        void setFull(false);
+        return;
+      }
+      if (expanded) {
+        setExpanded(false);
+        return;
+      }
+      onClose();
+    }, [picker, menuOpen, helpOpen, panelOpen, fullscreen, expanded, setFull, onClose]),
+  );
   useEffect(() => {
-    if (closing) videoRef.current?.pause();
-  }, [closing]);
-
-  // Trim opens over a clip that may still be playing, and its own preview is a
-  // second video of the same audio. Stop this one rather than layering them.
-  useEffect(() => {
-    if (trimOpen) videoRef.current?.pause();
-  }, [trimOpen, clip]);
-
-  const toggle = useCallback(() => {
-    const video = videoRef.current;
-    if (!video?.getAttribute('src')) return;
-    if (video.paused) playQuietly(video);
-    else video.pause();
-  }, []);
-
-  useEffect(() => {
-    if (!open || closing || trimOpen) return;
+    if (!open || closing || blocked) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
       const target = e.target instanceof HTMLElement ? e.target : null;
       if (target?.closest('input, textarea, select') || target?.isContentEditable) return;
-      if (e.code === 'Space' || e.key === ' ') {
-        // Let a focused control keep its native keyboard activation.
-        if (target?.closest('button, a, [role="button"], [role="switch"]')) return;
+      const key = e.key.toLowerCase();
+      if ((e.code === 'Space' || key === ' ') && target?.closest('button, a, [role="button"]'))
+        return;
+      if (e.code === 'Space' || key === ' ' || key === 'k') {
         e.preventDefault();
         if (!e.repeat) toggle();
-        return;
-      }
-      if (e.key === 'ArrowLeft') {
+      } else if (key === 'arrowleft' || key === 'arrowright') {
         e.preventDefault();
-        step(-1);
-      } else if (e.key === 'ArrowRight') {
+        const delta = key === 'arrowright' ? 1 : -1;
+        if (e.shiftKey) step(delta);
+        else seek((videoRef.current?.currentTime ?? 0) + delta * 5);
+      } else if (key === 'arrowup' || key === 'arrowdown') {
         e.preventDefault();
-        step(1);
-      } else if (e.key === 'h' || e.key === 'H') {
+        applyVolume(volume + (key === 'arrowup' ? 0.05 : -0.05));
+      } else if (key === 'home' || key === 'end') {
+        e.preventDefault();
+        seek(key === 'home' ? 0 : (videoRef.current?.duration ?? 0));
+      } else if (key === 'h' && !e.repeat) {
         e.preventDefault();
         void addHighlight();
-      } else if (e.key === 'f' || e.key === 'F') {
+      } else if (key === 'f' && !e.repeat) {
         e.preventDefault();
-        toggleExpanded();
-      } else if (e.key === 's' || e.key === 'S') {
+        void setFull(!fullscreen);
+      } else if (key === 's' && !e.repeat) {
         e.preventDefault();
         void saveFrame();
-      } else if (e.key === 'm' || e.key === 'M') {
+      } else if (key === 'm' && !e.repeat) {
         e.preventDefault();
         toggleMuted();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, closing, trimOpen, step, addHighlight, toggleExpanded, saveFrame, toggleMuted, toggle]);
+  }, [
+    open,
+    closing,
+    blocked,
+    toggle,
+    step,
+    seek,
+    addHighlight,
+    setFull,
+    fullscreen,
+    saveFrame,
+    toggleMuted,
+    applyVolume,
+    volume,
+  ]);
 
-  if (!mounted || !clip) return null;
-
-  const duration = position.duration;
-  const percent = duration > 0 ? (position.current / duration) * 100 : 0;
-
-  const seekFromPointer = (clientX: number) => {
-    const track = timelineRef.current;
-    if (!track || !duration) return;
-    const rect = track.getBoundingClientRect();
-    seekTo(videoRef.current, clamp01((clientX - rect.left) / rect.width) * duration);
-  };
-
-  const beginHighlightDrag = (event: React.PointerEvent, highlight: Highlight) => {
-    if (event.button !== 0 || !duration) return;
+  const beginHighlightDrag = (
+    event: React.PointerEvent,
+    highlight: Highlight,
+    track: HTMLElement,
+  ) => {
+    if (event.button !== 0 || !position.duration || !clip) return;
     event.preventDefault();
     event.stopPropagation();
+    dragCleanup.current?.();
     setDragging(highlight.id);
-
-    const timeAt = (clientX: number) => {
-      const rect = timelineRef.current?.getBoundingClientRect();
-      if (!rect) return null;
-      return clamp01((clientX - rect.left) / rect.width) * duration;
-    };
-
+    const slug = clip.slug;
     let latest = highlight.time;
-    const move = (moveEvent: PointerEvent) => {
-      const next = timeAt(moveEvent.clientX);
-      if (next == null) return;
-      latest = next;
-      onHighlightsChange(sortHighlights(replaceTime(highlights, highlight.id, round3(next))));
+    let moved = false;
+    const startX = event.clientX;
+    const timeAt = (clientX: number) => {
+      const rect = track.getBoundingClientRect();
+      return rect.width ? clamp01((clientX - rect.left) / rect.width) * position.duration : latest;
     };
-    const up = async (upEvent: PointerEvent) => {
+    const move = (e: PointerEvent) => {
+      if (liveClip.current !== slug) return;
+      if (Math.abs(e.clientX - startX) < 3 && !moved) return;
+      moved = true;
+      latest = round3(timeAt(e.clientX));
+      onHighlightsChange(current => sortHighlights(replaceTime(current, highlight.id, latest)));
+    };
+    const cleanup = () => {
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
-      window.removeEventListener('pointercancel', up, true);
+      window.removeEventListener('pointercancel', cancel, true);
+      dragCleanup.current = null;
       setDragging(null);
-      const applied = round3(timeAt(upEvent.clientX) ?? latest);
-      onHighlightsChange(sortHighlights(replaceTime(highlights, highlight.id, applied)));
+    };
+    const cancel = () => {
+      cleanup();
+      if (liveClip.current === slug)
+        onHighlightsChange(current =>
+          sortHighlights(replaceTime(current, highlight.id, highlight.time)),
+        );
+    };
+    const up = async () => {
+      cleanup();
+      if (!moved || liveClip.current !== slug) return;
       try {
-        const result = await api.updateHighlight(clip.slug, highlight.id, {time: applied});
+        const result = await api.updateHighlight(slug, highlight.id, {time: latest});
         if (result.ok === false) throw new Error(result.error || t('viewer.daemonRejectedMove'));
-        props.notify(`Highlight moved to ${formatDuration(applied, true)}`, undefined, 'accent');
       } catch (err) {
-        // Put it back where it was. An optimistic move that silently did not
-        // persist is worse than one that visibly snaps back.
-        onHighlightsChange(sortHighlights(replaceTime(highlights, highlight.id, highlight.time)));
+        if (liveClip.current === slug)
+          onHighlightsChange(current =>
+            sortHighlights(replaceTime(current, highlight.id, highlight.time)),
+          );
         props.notify(t('viewer.errMoveHighlight'), (err as Error).message, 'error');
       }
     };
+    dragCleanup.current = cleanup;
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', up, true);
-    window.addEventListener('pointercancel', up, true);
+    window.addEventListener('pointercancel', cancel, true);
   };
-
   const patchHighlight = async (id: string, body: Partial<Omit<Highlight, 'id'>>) => {
+    if (!clip) return;
+    const slug = clip.slug;
     try {
-      const result = await api.updateHighlight(clip.slug, id, body);
+      const result = await api.updateHighlight(slug, id, body);
       if (result.ok === false) throw new Error(result.error || t('viewer.daemonRejectedChange'));
-      onHighlightsChange(
-        sortHighlights(highlights.map(h => (h.id === id ? {...h, ...body} : h))),
-      );
+      if (liveClip.current === slug)
+        onHighlightsChange(current =>
+          sortHighlights(current.map(h => (h.id === id ? {...h, ...body} : h))),
+        );
     } catch (err) {
       props.notify(t('viewer.errUpdateHighlight'), (err as Error).message, 'error');
     }
   };
-
   const removeHighlight = async (id: string) => {
+    if (!clip) return;
+    const slug = clip.slug;
     try {
-      await api.deleteHighlight(clip.slug, id);
-      onHighlightsChange(highlights.filter(h => h.id !== id));
+      await api.deleteHighlight(slug, id);
+      if (liveClip.current === slug)
+        onHighlightsChange(current => current.filter(h => h.id !== id));
     } catch (err) {
       props.notify(t('viewer.errDeleteHighlight'), (err as Error).message, 'error');
     }
   };
 
+  // External modal portals must remain visible above the player, including in browser fullscreen.
+  const externalAction = (action: () => void) => {
+    setMenuOpen(false);
+    const run = () => {
+      setExpanded(false);
+      action();
+    };
+    if (fullscreen || fullscreenPending.current) {
+      void setFull(false).then(success => {
+        if (success) run();
+      });
+    } else run();
+  };
+  if (!mounted || !clip) return null;
   const meta = [
-    clip.duration ? formatDuration(Math.round(clip.duration), true) : '',
-    clip.width ? `${clip.width}x${clip.height}` : '',
+    clip.duration ? formatDuration(clip.duration, true) : '',
+    clip.width ? `${clip.width}×${clip.height}` : '',
     clip.size ? formatBytes(clip.size) : '',
   ]
     .filter(Boolean)
     .join(' · ');
-
+  const updatePosition = (video: HTMLVideoElement) =>
+    setPosition({
+      current: video.currentTime,
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
+    });
   return (
     <div
-      className="scrim viewer-scrim"
+      className="scrim watch-scrim"
       data-closing={closing || undefined}
-      onMouseDown={e => e.target === e.currentTarget && onClose()}>
-      <div className="viewer-stack">
+      onMouseDown={e => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={shellRef}
+        className="watch-shell"
+        role="dialog"
+        aria-modal="true"
+        aria-label={clipTitle(clip)}
+        tabIndex={-1}
+        data-immersive={immersive || undefined}
+        data-expanded={expanded || undefined}
+        data-fullscreen={fullscreen || undefined}
+        data-idle={idle || undefined}
+        data-closing={closing || undefined}
+      >
+        <header className="watch-heading" data-player-controls="true">
+          <div className="viewer-heading">
+            {renamingTitle ? (
+              <InlineRename
+                className="viewer-rename"
+                label={t('card.nameLabel')}
+                initial={clipTitle(clip)}
+                onCancel={() => setRenamingTitle(false)}
+                onSubmit={name => {
+                  setRenamingTitle(false);
+                  props.onRename(clip, name);
+                }}
+              />
+            ) : (
+              <h2
+                title={t('viewer.doubleClickRename')}
+                onDoubleClick={() => setRenamingTitle(true)}
+              >
+                {clipTitle(clip)}
+              </h2>
+            )}
+            <p className="mono">
+              {meta}
+              {clips.length > 1 ? ` · ${index + 1} / ${clips.length}` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="modal-close"
+            aria-label={t('viewer.closePlayer')}
+            onClick={onClose}
+          >
+            <IconClose size={18} />
+          </button>
+        </header>
         <div
-          className="modal viewer"
-          data-closing={closing || undefined}
-          role="dialog"
-          aria-modal="true"
-          aria-label={clipTitle(clip)}>
-          <header className="viewer-head">
-            <div className="viewer-heading">
-              {renamingTitle ? (
-                <InlineRename
-                  className="viewer-rename"
-                  label={t('card.nameLabel')}
-                  initial={clipTitle(clip)}
-                  onCancel={() => setRenamingTitle(false)}
-                  onSubmit={name => {
-                    setRenamingTitle(false);
-                    props.onRename(clip, name);
-                  }}
-                />
-              ) : (
-                <h2
-                  title={t('viewer.doubleClickRename')}
-                  onDoubleClick={() => setRenamingTitle(true)}>
-                  {clipTitle(clip)}
-                </h2>
-              )}
-              <p className="mono">{meta}</p>
+          className="watch-stage"
+          ref={stageRef}
+          onClick={e => {
+            if (
+              e.target instanceof Element &&
+              e.target.closest(
+                'button, input, select, [data-player-controls], .video-overlay, .key-overlay',
+              )
+            )
+              return;
+            // A browser-recognized second click belongs to double-click only.
+            if (e.detail > 1) return;
+            window.clearTimeout(clickTimer.current);
+            const intent = {
+              slug: liveClip.current,
+              wasPaused: videoRef.current?.paused ?? true,
+              applied: false,
+            };
+            clickIntent.current = intent;
+            clickTimer.current = window.setTimeout(() => {
+              if (clickIntent.current !== intent || liveClip.current !== intent.slug) return;
+              intent.applied = true;
+              toggle();
+            }, 300);
+            // Return keyboard ownership to the player without stealing focus from controls.
+            shellRef.current?.focus({preventScroll: true});
+          }}
+          onDoubleClick={e => {
+            if (
+              e.target instanceof Element &&
+              e.target.closest(
+                'button, input, select, [data-player-controls], .video-overlay, .key-overlay',
+              )
+            )
+              return;
+            window.clearTimeout(clickTimer.current);
+            const intent = clickIntent.current;
+            // Desktop double-click intervals can exceed our single-click delay.
+            // Restore the original transport state if that delay already fired.
+            if (intent?.applied && intent.slug === liveClip.current) {
+              if (intent.wasPaused) videoRef.current?.pause();
+              else playQuietly(videoRef.current);
+            }
+            clickIntent.current = null;
+            void setFull(!fullscreen);
+          }}
+        >
+          <video
+            ref={videoRef}
+            className="watch-video"
+            playsInline
+            onTimeUpdate={e => updatePosition(e.currentTarget)}
+            onLoadedMetadata={e => updatePosition(e.currentTarget)}
+            onPlay={() => setPaused(false)}
+            onPause={() => setPaused(true)}
+            onCanPlay={() => setPreparing(false)}
+            onLoadedData={() => setPreparing(false)}
+            onError={() => {
+              setPreparing(false);
+              videoRef.current?.pause();
+            }}
+            onEnded={() => {
+              if (endBehavior === 'loop') {
+                seek(0);
+                playQuietly(videoRef.current);
+              } else if (endBehavior === 'next') step(1);
+            }}
+          />
+          {paused && !preparing && !failed ? (
+            <button
+              type="button"
+              className="watch-center-play"
+              aria-label={t('viewer.play')}
+              onClick={toggle}
+            >
+              <PlayGlyph />
+            </button>
+          ) : null}
+          {preparing ? (
+            <div className="video-overlay">
+              <span className="video-spinner" aria-hidden="true" />
+              <p>{t('viewer.preparingPreview')}</p>
             </div>
-            {clips.length > 1 ? (
-              <span className="viewer-count mono">
-                {index + 1} / {clips.length}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className="viewer-nav"
-              onClick={() => step(-1)}
-              disabled={index <= 0}
-              aria-label={t('viewer.prevClip')}>
-              <Chevron dir="left" />
-            </button>
-            <button
-              type="button"
-              className="viewer-nav"
-              onClick={() => step(1)}
-              disabled={index < 0 || index >= clips.length - 1}
-              aria-label={t('viewer.nextClip')}>
-              <Chevron dir="right" />
-            </button>
-            <button
-              type="button"
-              className="viewer-nav"
-              onClick={() => void saveFrame()}
-              disabled={grabbing || clip.unreadable}
-              title={t('viewer.saveFrameHint')}
-              aria-label={t('viewer.saveFrame')}>
-              <CameraGlyph />
-            </button>
-            <button
-              type="button"
-              className="viewer-nav"
-              onClick={toggleExpanded}
-              aria-pressed={expanded}
-              title={expanded ? t('viewer.shrinkHint') : t('viewer.expandHint')}
-              aria-label={expanded ? t('viewer.shrink') : t('viewer.expand')}>
-              <IconExpand collapse={expanded} />
-            </button>
-            <button type="button" className="modal-close" onClick={onClose} aria-label={t('common.close')}>
-              <IconClose size={15} />
-            </button>
-          </header>
-
-          <div
-            className="viewer-stage"
-            ref={stageRef}
-            data-expanded={expanded || undefined}
-            data-idle={(expanded && idle) || undefined}
-            onClick={toggle}
-            onDoubleClick={toggleExpanded}>
-            <video
-              ref={videoRef}
-              className="viewer-video"
-              playsInline
-              onTimeUpdate={e =>
-                setPosition({
-                  current: e.currentTarget.currentTime,
-                  duration: Number.isFinite(e.currentTarget.duration)
-                    ? e.currentTarget.duration
-                    : 0,
-                })
-              }
-              onLoadedMetadata={e =>
-                setPosition({
-                  current: e.currentTarget.currentTime,
-                  duration: Number.isFinite(e.currentTarget.duration)
-                    ? e.currentTarget.duration
-                    : 0,
-                })
-              }
-              onPlay={() => setPaused(false)}
-              onPause={() => setPaused(true)}
-              onCanPlay={() => setPreparing(false)}
-              onLoadedData={() => setPreparing(false)}
-              onError={() => setPreparing(false)}
-            />
-            <button
-              type="button"
-              className="viewer-play"
-              data-paused={paused || undefined}
-              aria-label={paused ? t('viewer.play') : t('viewer.pause')}>
-              {paused ? <PlayGlyph /> : <PauseGlyph />}
-            </button>
-            <span className="viewer-timebadge mono">
-              {formatDuration(position.current, true)} / {formatDuration(duration, true)}
-            </span>
-
-            {preparing ? (
-              <div className="video-overlay" onClick={e => e.stopPropagation()}>
-                <span className="video-spinner" aria-hidden="true" />
-                <p>{t('viewer.preparingPreview')}</p>
-              </div>
-            ) : null}
-
-            {/* The modal's own timeline and the player bar are both scrolled
-                away while expanded, so the stage carries its own transport. */}
-            {expanded ? (
-              <div
-                className="viewer-expanded-bar"
-                onClick={e => e.stopPropagation()}
-                onDoubleClick={e => e.stopPropagation()}>
-                <span className="mono player-tc">{formatDuration(position.current, true)}</span>
-                <Scrubber
-                  percent={percent}
-                  onSeek={ratio => seekTo(videoRef.current, ratio * duration)}
-                />
-                <span className="mono player-tc">{formatDuration(duration, true)}</span>
-                <VolumeControl
-                  volume={volume}
-                  muted={muted}
-                  onChange={applyVolume}
-                  onToggleMute={toggleMuted}
-                />
+          ) : null}
+          {keyIntervals && keysShown && !failed ? (
+            <KeyOverlay video={videoRef} intervals={keyIntervals} />
+          ) : null}
+          {failed ? (
+            <div className="video-overlay">
+              <p>{videoFailureMessage()}</p>
+              <div className="video-overlay-actions">
+                <button type="button" className="btn" onClick={() => props.onOpenExternally(clip)}>
+                  {t('viewer.openInPlayer')}
+                </button>
                 <button
                   type="button"
-                  className="player-btn"
-                  onClick={toggleExpanded}
-                  aria-label={t('viewer.shrink')}>
-                  <IconExpand collapse />
+                  className="btn btn-quiet"
+                  onClick={() => props.onReveal(clip)}
+                >
+                  {t('viewer.showInFolder')}
                 </button>
               </div>
-            ) : null}
-
-            {keyIntervals && keysShown && !failed ? (
-              <KeyOverlay video={videoRef} intervals={keyIntervals} />
-            ) : null}
-
-            {failed ? (
-              <div className="video-overlay" onClick={e => e.stopPropagation()}>
-                <p>{videoFailureMessage()}</p>
-                <div className="video-overlay-actions">
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => props.onOpenExternally(clip)}>
-                    {t('viewer.openInPlayer')}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-quiet"
-                    onClick={() => props.onReveal(clip)}>
-                    {t('viewer.showInFolder')}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="viewer-bottom">
-            <div
-              className="viewer-timeline"
-              ref={timelineRef}
-              onClick={e => seekFromPointer(e.clientX)}>
-              <div className="viewer-progress" style={{width: `${percent}%`}} />
-              <div className="viewer-playhead" style={{left: `${percent}%`}} />
-              {highlights.map(h => (
-                <button
-                  key={h.id}
-                  type="button"
-                  className="hl-marker"
-                  data-dragging={dragging === h.id || undefined}
-                  style={{
-                    left: `${duration ? (h.time / duration) * 100 : 0}%`,
-                    background: h.color || DEFAULT_HIGHLIGHT_COLOR,
-                  }}
-                  title={`${h.label}, ${formatDuration(h.time, true)}, drag to move`}
-                  aria-label={t('viewer.highlightAt', {label: h.label, time: formatDuration(h.time, true)})}
-                  onPointerDown={e => beginHighlightDrag(e, h)}
-                  onClick={e => {
-                    e.stopPropagation();
-                    if (!dragging) seekTo(videoRef.current, h.time);
-                  }}
-                />
-              ))}
             </div>
-
+          ) : null}
+        </div>
+        <div ref={controlsRef} className="watch-control-area">
+          <ViewerControls
+            paused={paused}
+            current={position.current}
+            duration={position.duration}
+            volume={volume}
+            muted={muted}
+            speed={speed}
+            endBehavior={endBehavior}
+            highlights={highlights}
+            canPrevious={index > 0}
+            canNext={index >= 0 && index < clips.length - 1}
+            expanded={expanded}
+            fullscreen={fullscreen}
+            fullscreenBusy={fullscreenBusy}
+            shareLabel={props.shareLabel}
+            panelOpen={panelOpen}
+            menuOpen={menuOpen}
+            onToggle={toggle}
+            onStep={step}
+            onSeek={seek}
+            onVolume={applyVolume}
+            onMute={toggleMuted}
+            onSpeed={applySpeed}
+            onEndBehavior={setEndBehavior}
+            onExpand={() => setExpanded(value => !value)}
+            onFullscreen={() => void setFull(!fullscreen)}
+            onShare={() => externalAction(() => props.onShare(clip))}
+            onShareMenu={() => externalAction(() => props.onShareMenu(clip))}
+            onPanel={() => {
+              setPanelOpen(value => !value);
+              setMenuOpen(false);
+              setHelpOpen(false);
+            }}
+            onMenu={() => {
+              setMenuOpen(value => !value);
+              setPanelOpen(false);
+              setHelpOpen(false);
+            }}
+            onHighlightDrag={beginHighlightDrag}
+          />
+        </div>
+        {panelOpen ? (
+          <section
+            id="watch-highlights"
+            className="watch-panel"
+            aria-label={t('viewer.highlightsHeading')}
+            data-player-controls="true"
+          >
+            <button
+              type="button"
+              className="watch-panel-close player-btn"
+              aria-label={t('common.close')}
+              onClick={() => setPanelOpen(false)}
+            >
+              <IconClose size={14} />
+            </button>
             <div className="viewer-hl-head">
               <span className="eyebrow">{t('viewer.highlightsHeading')}</span>
-              <button type="button" className="btn btn-quiet btn-sm" onClick={() => void addHighlight()}>
+              <button
+                type="button"
+                className="btn btn-quiet btn-sm"
+                onClick={() => void addHighlight()}
+              >
                 {tNode('viewer.addHighlightKey', {key: <kbd key="k">H</kbd>})}
               </button>
             </div>
@@ -730,7 +886,7 @@ export function Viewer(props: ViewerProps) {
                 </p>
               ) : (
                 highlights.map(h => (
-                  <div className="hl-item" key={h.id} onClick={() => seekTo(videoRef.current, h.time)}>
+                  <div className="hl-item" key={h.id} onClick={() => seek(h.time)}>
                     <button
                       type="button"
                       className="hl-swatch"
@@ -768,7 +924,8 @@ export function Viewer(props: ViewerProps) {
                         onDoubleClick={e => {
                           e.stopPropagation();
                           setRenaming(h.id);
-                        }}>
+                        }}
+                      >
                         {h.label}
                       </span>
                     )}
@@ -780,288 +937,150 @@ export function Viewer(props: ViewerProps) {
                       onClick={e => {
                         e.stopPropagation();
                         void removeHighlight(h.id);
-                      }}>
+                      }}
+                    >
                       <IconClose size={12} />
                     </button>
                   </div>
                 ))
               )}
             </div>
-
-            <footer className="viewer-foot">
-              <span className="viewer-shortcuts mono">
-                {t('viewer.shortcuts')}
-              </span>
-              <div className="viewer-foot-btns">
-                {keyIntervals ? (
-                  <button
-                    type="button"
-                    className={keysShown ? 'btn btn-sm' : 'btn btn-quiet btn-sm'}
-                    aria-pressed={keysShown}
-                    onClick={() => {
-                      setKeysShown(!keysShown);
-                      remember(KEYS_SHOWN_KEY, keysShown ? '0' : '1');
-                    }}>
-                    {t('viewer.keys')}
-                  </button>
-                ) : null}
-                <button type="button" className="btn btn-quiet btn-sm" onClick={() => props.onTrim(clip)}>
-                  {t('viewer.trim')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-quiet btn-sm"
-                  title={props.shareLabel}
-                  onClick={() => props.onShare(clip)}
-                  onContextMenu={e => {
-                    e.preventDefault();
-                    props.onShareMenu(clip);
-                  }}>
-                  {t('viewer.share')}
-                </button>
-                <button type="button" className="btn btn-quiet btn-sm" onClick={() => props.onReveal(clip)}>
-                  {t('viewer.reveal')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-quiet btn-danger btn-sm"
-                  onClick={() => props.onDelete(clip)}>
-                  {t('viewer.delete')}
-                </button>
-              </div>
-            </footer>
+          </section>
+        ) : null}
+        {menuOpen ? (
+          <div
+            id="watch-actions"
+            className="watch-menu"
+            role="region"
+            aria-label={t('viewer.actions')}
+            data-player-controls="true"
+          >
+            <button type="button" onClick={() => externalAction(() => props.onTrim(clip))}>
+              {t('viewer.trim')}
+            </button>
+            <button
+              type="button"
+              disabled={grabbing || clip.unreadable}
+              onClick={() => {
+                setMenuOpen(false);
+                void saveFrame();
+              }}
+            >
+              {t('viewer.saveFrame')}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                props.onReveal(clip);
+              }}
+            >
+              {t('viewer.reveal')}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                setRenamingTitle(true);
+              }}
+            >
+              {t('viewer.rename')}
+            </button>
+            {keyIntervals ? (
+              <button
+                type="button"
+                aria-pressed={keysShown}
+                onClick={() => {
+                  setKeysShown(!keysShown);
+                  remember(KEYS_SHOWN_KEY, keysShown ? '0' : '1');
+                }}
+              >
+                {t('viewer.keys')}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                setHelpOpen(true);
+              }}
+            >
+              {t('viewer.shortcutHelp')}
+            </button>
+            <button
+              type="button"
+              className="watch-delete"
+              onClick={() => externalAction(() => props.onDelete(clip))}
+            >
+              {t('viewer.delete')}
+            </button>
           </div>
-        </div>
-
-        <PlayerBar
-          clip={clip}
-          paused={paused}
-          current={position.current}
-          duration={duration}
-          volume={volume}
-          muted={muted}
-          canStepBack={index > 0}
-          canStepForward={index >= 0 && index < clips.length - 1}
-          onToggle={toggle}
-          onStep={step}
-          onVolume={applyVolume}
-          onToggleMute={toggleMuted}
-          onShare={() => props.onShare(clip)}
-          onShareMenu={() => props.onShareMenu(clip)}
-          shareLabel={props.shareLabel}
-          onClose={onClose}
-        />
+        ) : null}
+        {helpOpen ? (
+          <section
+            className="watch-panel watch-help"
+            aria-label={t('viewer.shortcutHelp')}
+            data-player-controls="true"
+          >
+            <button
+              type="button"
+              className="watch-panel-close player-btn"
+              aria-label={t('common.close')}
+              onClick={() => setHelpOpen(false)}
+            >
+              <IconClose size={14} />
+            </button>
+            <h3>{t('viewer.shortcutHelp')}</h3>
+            <dl>
+              {[
+                ['Space / K', 'helpPlay'],
+                ['← / →', 'helpSeek'],
+                ['Shift + ← / →', 'helpClips'],
+                ['↑ / ↓', 'volume'],
+                ['Home / End', 'helpBounds'],
+                ['M', 'mute'],
+                ['F', 'fullscreen'],
+                ['H', 'addHighlight'],
+                ['S', 'saveFrame'],
+                ['Esc', 'helpEscape'],
+              ].map(([key, label]) => (
+                <div key={key}>
+                  <dt>
+                    <kbd>{key}</kbd>
+                  </dt>
+                  <dd>{t(`viewer.${label}`)}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        ) : null}
+        {fullscreenError ? (
+          <div className="watch-error" role="alert" data-player-controls="true">
+            <span>
+              {t('viewer.fullscreenFailed')}: {fullscreenError}
+            </span>
+            <button
+              type="button"
+              className="player-btn"
+              aria-label={t('common.close')}
+              onClick={() => setFullscreenError(null)}
+            >
+              <IconClose size={14} />
+            </button>
+          </div>
+        ) : null}
+        {picker ? (
+          <ColorPicker
+            at={picker.at}
+            current={picker.color}
+            onClose={() => setPicker(null)}
+            onPick={color => {
+              setPicker(null);
+              void patchHighlight(picker.id, {color});
+            }}
+          />
+        ) : null}
       </div>
-
-      {picker ? (
-        <ColorPicker
-          at={picker.at}
-          current={picker.color}
-          onClose={() => setPicker(null)}
-          onPick={color => {
-            setPicker(null);
-            void patchHighlight(picker.id, {color});
-          }}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * The bar under the viewer.
- *
- * It used to carry a second scrub track driven by the same playhead as the
- * modal's own timeline, which meant two playheads for one video and no volume
- * control anywhere. The timeline above owns seeking, because it is the one
- * with the highlight markers on it, so the space here went to the audio (#174).
- */
-function PlayerBar({
-  clip,
-  paused,
-  current,
-  duration,
-  volume,
-  muted,
-  canStepBack,
-  canStepForward,
-  onToggle,
-  onStep,
-  onVolume,
-  onToggleMute,
-  onShare,
-  onShareMenu,
-  shareLabel,
-  onClose,
-}: {
-  clip: Clip;
-  paused: boolean;
-  current: number;
-  duration: number;
-  volume: number;
-  muted: boolean;
-  canStepBack: boolean;
-  canStepForward: boolean;
-  onToggle: () => void;
-  onStep: (delta: number) => void;
-  onVolume: (next: number) => void;
-  onToggleMute: () => void;
-  onShare: () => void;
-  onShareMenu: () => void;
-  shareLabel: string;
-  onClose: () => void;
-}) {
-  return (
-    <div className="player-bar">
-      <div className="player-clip">
-        {clip.thumb_url ? <img src={clip.thumb_url} alt="" /> : <span className="player-thumb-empty" />}
-        <div className="player-titles">
-          <b>{clipTitle(clip)}</b>
-          <span className="mono">{clip.game || ''}</span>
-        </div>
-      </div>
-
-      <div className="player-controls">
-        <button
-          type="button"
-          className="player-btn"
-          onClick={() => onStep(-1)}
-          disabled={!canStepBack}
-          aria-label={t('viewer.prevClip')}>
-          <StepGlyph dir="back" />
-        </button>
-        <button type="button" className="player-main" onClick={onToggle} aria-label={paused ? t('viewer.play') : t('viewer.pause')}>
-          {paused ? <PlayGlyph /> : <PauseGlyph />}
-        </button>
-        <button
-          type="button"
-          className="player-btn"
-          onClick={() => onStep(1)}
-          disabled={!canStepForward}
-          aria-label={t('viewer.nextClip')}>
-          <StepGlyph dir="forward" />
-        </button>
-      </div>
-
-      <div className="player-audio">
-        <span className="mono player-tc">
-          {formatDuration(current, true)} / {formatDuration(duration, true)}
-        </span>
-        <VolumeControl
-          volume={volume}
-          muted={muted}
-          onChange={onVolume}
-          onToggleMute={onToggleMute}
-        />
-      </div>
-
-      <div className="player-extra">
-        <button
-          type="button"
-          className="player-btn"
-          onClick={onShare}
-          onContextMenu={e => {
-            e.preventDefault();
-            onShareMenu();
-          }}
-          title={shareLabel}
-          aria-label={shareLabel}>
-          <ShareGlyph />
-        </button>
-        <button type="button" className="player-btn" onClick={onClose} aria-label={t('viewer.closePlayer')}>
-          <IconClose size={15} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** A seekable track. Click anywhere, or press and drag along it. */
-function Scrubber({percent, onSeek}: {percent: number; onSeek: (ratio: number) => void}) {
-  const trackRef = useRef<HTMLDivElement>(null);
-
-  const ratioAt = (clientX: number): number | null => {
-    const rect = trackRef.current?.getBoundingClientRect();
-    if (!rect || !rect.width) return null;
-    return clamp01((clientX - rect.left) / rect.width);
-  };
-
-  const begin = (event: React.PointerEvent) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const first = ratioAt(event.clientX);
-    if (first !== null) onSeek(first);
-
-    const move = (moveEvent: PointerEvent) => {
-      const next = ratioAt(moveEvent.clientX);
-      if (next !== null) onSeek(next);
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move, true);
-      window.removeEventListener('pointerup', up, true);
-      window.removeEventListener('pointercancel', up, true);
-    };
-    window.addEventListener('pointermove', move, true);
-    window.addEventListener('pointerup', up, true);
-    window.addEventListener('pointercancel', up, true);
-  };
-
-  return (
-    <div className="player-track" ref={trackRef} onPointerDown={begin}>
-      <div className="player-fill" style={{width: `${percent}%`}} />
-      <div className="player-knob" style={{left: `${percent}%`}} />
-    </div>
-  );
-}
-
-/**
- * Speaker plus level.
- *
- * The track is a native range input: arrows, Home, End and a screen reader all
- * come from the platform rather than from a hand-rolled div with a role on it.
- * That approach and the stylesheet behind it are voltek's, from #179.
- *
- * Mute is kept as its own flag rather than as a level of zero, so muting does
- * not throw away the level the user chose. Storing zero is what made unmuting
- * after a restart jump back to full volume.
- */
-function VolumeControl({
-  volume,
-  muted,
-  onChange,
-  onToggleMute,
-}: {
-  volume: number;
-  muted: boolean;
-  onChange: (next: number) => void;
-  onToggleMute: () => void;
-}) {
-  // Muted shows an empty track, so the control always agrees with what is
-  // coming out of the speakers rather than with the number behind it.
-  const shown = muted ? 0 : volume;
-
-  return (
-    <div className="player-volume">
-      <button
-        type="button"
-        className="player-btn"
-        onClick={onToggleMute}
-        aria-pressed={muted}
-        title={muted ? t('viewer.unmuteHint') : t('viewer.muteHint')}
-        aria-label={muted ? t('viewer.unmute') : t('viewer.mute')}>
-        <SpeakerGlyph level={shown} />
-      </button>
-      <input
-        type="range"
-        className="player-volume-range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={shown}
-        aria-label={t('viewer.volume')}
-        style={{['--filled' as string]: `${shown * 100}%`}}
-        onChange={e => onChange(Number(e.target.value))}
-      />
     </div>
   );
 }
@@ -1129,61 +1148,8 @@ function nextHighlightLabel(highlights: Highlight[]): string {
   return t('viewer.highlightNumbered', {base, n});
 }
 
-const stroke = {
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 2.2,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
-  'aria-hidden': true,
-};
-
-const Chevron = ({dir}: {dir: 'left' | 'right'}) => (
-  <svg {...stroke} width={16} height={16}>
-    <path d={dir === 'left' ? 'M15 6 9 12l6 6' : 'M9 6l6 6-6 6'} />
-  </svg>
-);
 const PlayGlyph = () => (
   <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor" aria-hidden="true">
     <path d="M7 4l13 8-13 8z" />
-  </svg>
-);
-const PauseGlyph = () => (
-  <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor" aria-hidden="true">
-    <path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z" />
-  </svg>
-);
-const StepGlyph = ({dir}: {dir: 'back' | 'forward'}) => (
-  <svg viewBox="0 0 24 24" width={13} height={13} fill="currentColor" aria-hidden="true">
-    <path d={dir === 'back' ? 'M6 4h2v16H6zM20 4 9.5 12 20 20z' : 'M18 4h-2v16h2zM4 4l10.5 8L4 20z'} />
-  </svg>
-);
-const CameraGlyph = () => (
-  <svg {...stroke} width={15} height={15} strokeWidth={2}>
-    <path d="M3 8.5A1.5 1.5 0 0 1 4.5 7h2L8 4.5h8L17.5 7h2A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" />
-    <circle cx="12" cy="13" r="3.4" />
-  </svg>
-);
-/* Three states rather than two: at a glance the difference between quiet and
-   muted matters more than the exact number on the slider. */
-const SpeakerGlyph = ({level}: {level: number}) => (
-  <svg {...stroke} width={15} height={15} strokeWidth={2}>
-    <path d="M4 9.5h3L11 6v12L7 14.5H4z" />
-    {level <= 0 ? (
-      <path d="m15 9.5 4.5 5M19.5 9.5l-4.5 5" />
-    ) : level < 0.55 ? (
-      <path d="M14.8 9.8a3 3 0 0 1 0 4.4" />
-    ) : (
-      <path d="M14.8 9.8a3 3 0 0 1 0 4.4M17.3 7.6a6.5 6.5 0 0 1 0 8.8" />
-    )}
-  </svg>
-);
-const ShareGlyph = () => (
-  <svg {...stroke} width={15} height={15} strokeWidth={2}>
-    <circle cx="18" cy="5" r="3" />
-    <circle cx="6" cy="12" r="3" />
-    <circle cx="18" cy="19" r="3" />
-    <path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4" />
   </svg>
 );

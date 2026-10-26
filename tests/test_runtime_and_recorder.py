@@ -186,7 +186,8 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
 
 class WebviewEnvironmentTests(unittest.TestCase):
-    def test_sets_default_chromium_flags(self) -> None:
+    @mock.patch("vice.app._hardware_video_decode_enabled", return_value=False)
+    def test_sets_default_chromium_flags(self, _decode_enabled) -> None:
         env = {"LANG": "en_US.UTF-8"}
         with mock.patch.dict(os.environ, env, clear=True):
             with mock.patch("vice.app._is_nvidia", return_value=False):
@@ -1936,7 +1937,8 @@ class RecorderAudioCommandTests(unittest.TestCase):
         self.assertIn("-c:v", flags)
         self.assertEqual(flags[flags.index("-c:v") + 1], "hevc_vaapi")
 
-    def test_gsr_build_cmd_maps_av1_encoders_to_gsr_codec(self) -> None:
+    @mock.patch("vice.recorder._gsr_supported_codecs", return_value=frozenset({"h264", "hevc", "av1"}))
+    def test_gsr_build_cmd_maps_av1_encoders_to_gsr_codec(self, _supported_codecs) -> None:
         for encoder in ("av1_nvenc", "av1_vaapi", "av1"):
             recorder = GSRRecorder(
                 Config(
