@@ -56,12 +56,13 @@ export function useRenameClip(): (clip: Clip, name: string) => Promise<Clip | nu
   );
 }
 
-export function useClipActions(): {actions: ClipActions; overlays: ReactNode} {
+export function useClipActions(originatingClips?: readonly Clip[]): {actions: ClipActions; overlays: ReactNode} {
   const {state, notify, refreshPlaylists} = useStore();
-  const {openViewer, openTrim, openShare} = usePlayback();
+  const {openViewer, openTrim, openShare, renameClip} = usePlayback();
+  const originatingSlugs = useMemo(() => originatingClips?.map(clip => clip.slug), [originatingClips]);
   const {playlists} = state;
 
-  const [menu, setMenu] = useState<{clip: Clip; at: {x: number; y: number}} | null>(null);
+  const [menu, setMenu] = useState<{clip: Clip; at: {x: number; y: number}; slugs?: readonly string[]} | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Clip | null>(null);
   const [manualCopy, setManualCopy] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -109,7 +110,6 @@ export function useClipActions(): {actions: ClipActions; overlays: ReactNode} {
     [fail, say],
   );
 
-  const renameClip = useRenameClip();
   const rename = useCallback(
     async (clip: Clip, name: string) => {
       await renameClip(clip, name);
@@ -119,7 +119,7 @@ export function useClipActions(): {actions: ClipActions; overlays: ReactNode} {
 
   const actions = useMemo<ClipActions>(
     () => ({
-      onOpen: clip => openViewer(clip.slug),
+      onOpen: clip => openViewer(clip.slug, originatingSlugs),
       onTrim: clip => openTrim(clip.slug),
       onShare: share,
       onShareMenu: clip => openShare(clip.slug),
@@ -128,11 +128,11 @@ export function useClipActions(): {actions: ClipActions; overlays: ReactNode} {
       onReveal: reveal,
       onDelete: setConfirmDelete,
       onRename: rename,
-      onContextMenu: (clip, at) => setMenu({clip, at}),
+      onContextMenu: (clip, at) => setMenu({clip, at, slugs: originatingSlugs}),
       renamingSlug: renaming,
       onRenameDone: () => setRenaming(null),
     }),
-    [openViewer, openTrim, openShare, share, discordFile, copyFile, reveal, rename, renaming],
+    [openViewer, openTrim, openShare, share, discordFile, copyFile, reveal, rename, renaming, originatingSlugs],
   );
 
   const menuClip = menu?.clip;
@@ -145,7 +145,7 @@ export function useClipActions(): {actions: ClipActions; overlays: ReactNode} {
           emptyLabel={t('common.noActions')}
           onClose={() => setMenu(null)}
           items={[
-            {id: 'open', label: t('card.open'), onSelect: () => openViewer(menuClip.slug)},
+            {id: 'open', label: t('card.open'), onSelect: () => openViewer(menuClip.slug, menu.slugs)},
             {id: 'trim', label: t('card.trim'), onSelect: () => openTrim(menuClip.slug)},
             {id: 'rename', label: t('card.rename'), onSelect: () => setRenaming(menuClip.slug)},
             {
