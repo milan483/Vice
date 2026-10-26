@@ -160,6 +160,21 @@ OBS has a replay buffer. So why use Vice?
 
 Game detection (filename tagging and Discord presence) works on X11, Hyprland, sway and Niri. Works on KDE Plasma Wayland when `kdotool` is available. On other compositors clips simply save untagged.
 
+**Game Capture on KDE Plasma Wayland.** With a recognized game pinned, Vice
+captures its KWin window through PipeWire and keeps using GPU Screen Recorder
+for encoding, audio, replay clips and sessions. This works for both native
+Wayland and XWayland game windows, without following focus to another app.
+It requires the native `gpu-screen-recorder`, `kdotool`, `dbus-daemon`,
+libwayland-client, and Python's `dbus` and `gi` modules. On Arch/CachyOS, install
+`kdotool python-dbus python-gobject`; the remaining libraries normally come with
+the desktop. Other compositors keep their existing capture path.
+KWin must expose and authorize its window-screencast protocol; Vice does not
+disable compositor permission checks or change the desktop's portal service.
+
+Game detection, pin changes and fallback behavior are unchanged: before a game
+is detected or after its pinned window closes, Vice records the configured
+display. Closing a game does not automatically stop a session recording.
+
 ## CLI
 
 ```
@@ -203,6 +218,7 @@ clip_duration   = 20      # seconds saved per clip
 fps             = 60
 display         = "DP-1"  # optional; omit to use the backend default display
 follow_mouse_display = false # record whichever monitor the pointer is on, ignoring `display`
+window_capture  = false # pin capture to a recognized game window; otherwise use the display
 encoder         = "auto"  # auto | h264_nvenc | hevc_nvenc | h264_vaapi | hevc_vaapi | libx264 | libx265
 color_depth     = "8"     # 8 | 10 (10-bit needs an HEVC or AV1 encoder)
 backend         = "auto"  # auto | gsr | wf-recorder | ffmpeg

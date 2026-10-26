@@ -26,6 +26,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import unicodedata
 from abc import ABC, abstractmethod
@@ -288,6 +289,8 @@ def _program_name(cmd: list[str]) -> str:
     """The recorder a command runs, seeing through flatpak run."""
     if cmd[:len(GSR_FLATPAK_PREFIX)] == GSR_FLATPAK_PREFIX:
         return "gpu-screen-recorder"
+    if cmd[1:3] == ["-m", "vice.kwin_gsr_bridge"]:
+        return "gpu-screen-recorder"
     return cmd[0] if cmd else ""
 
 
@@ -306,6 +309,13 @@ def _gsr_help_text() -> str:
 
 def _gsr_supports_flag(flag: str) -> bool:
     return flag in _gsr_help_text()
+
+
+def gsr_supports_kwin_capture() -> bool:
+    """The adapter needs native portal input with isolated restore tokens."""
+    return gsr_source() == "native" and all(_gsr_supports_flag(flag) for flag in (
+        "-restore-portal-session", "-portal-session-token-filepath",
+    ))
 
 
 @lru_cache(maxsize=None)
@@ -932,17 +942,22 @@ def _gsr_capture_args(
     recognized game is focused, see Daemon._window_capture_loop. This is
     deliberately not GSR's own `-w focused` mode, which tracks whichever
     window currently has input focus and would jump to Discord/a browser/etc.
-    the moment you alt-tab away from the game. Pinning by id is X11/XWayland-
-    only (GSR's per-window capture doesn't support native-Wayland windows),
-    which is still the common case: Steam/Proton games render through
-    XWayland even on a Wayland desktop. Falls back to full-display capture
-    when no game is pinned yet or geometry can't be resolved.
+    the moment you alt-tab away from the game. Raw ids use GSR's X11 window
+    capture. On KDE Wayland, `kwin:` ids use the optional KWin compatibility
+    adapter instead; passing XWayland ids directly to GSR does not work.
+    Falls back to full-display capture when no game is pinned yet or geometry
+    can't be resolved, preserving the upstream policy.
     """
     if _gsr_has_any_flag(extra, "-w"):
         return []
     if getattr(rc, "window_capture", False) and window_override:
         geometry = active_window.get_window_geometry(window_override)
         if geometry:
+            if window_override.startswith("kwin:"):
+                # The private adapter supplies this exact compositor window
+                # to GSR's existing PipeWire input. GSR still owns encoding,
+                # audio, the replay buffer and session finalization.
+                return ["-w", "portal"]
             args = ["-w", window_override]
             if not (getattr(rc, "resolution", None) or _gsr_has_any_flag(extra, "-s")):
                 args += ["-s", f"{geometry[0]}x{geometry[1]}"]
@@ -953,6 +968,21 @@ def _gsr_capture_args(
             window_override,
         )
     return ["-w", _gsr_capture_target(rc, override)]
+
+
+def _gsr_window_compat_command(cmd: list[str], rc, extra: list[str], window_id: Optional[str]) -> list[str]:
+    """Only adapt pinned KWin sources; preserve upstream/manual commands."""
+    if (not getattr(rc, "window_capture", False) or not window_id
+            or not window_id.startswith("kwin:") or _gsr_has_any_flag(extra, "-w")):
+        return cmd
+    # Geometry can disappear between source selection and command building.
+    # Do not wrap a monitor command as though it were a window stream.
+    if "-w" not in cmd or cmd[cmd.index("-w") + 1] != "portal":
+        return cmd
+    if _is_flatpak_capture(cmd) or not gsr_supports_kwin_capture():
+        raise RuntimeError("KDE window capture needs native GPU Screen Recorder with portal token support")
+    return [sys.executable, "-m", "vice.kwin_gsr_bridge", "--window",
+            window_id.removeprefix("kwin:"), "--", *cmd]
 
 
 def _wf_capture_target(rc, override: Optional[str] = None) -> Optional[str]:
@@ -1279,6 +1309,7 @@ async def _spawn_capture(cmd: list[str], stderr) -> asyncio.subprocess.Process:
         start_new_session=True,
     )
     proc.vice_flatpak = _is_flatpak_capture(cmd)  # type: ignore[attr-defined]
+    proc.vice_kwin_bridge = cmd[1:3] == ["-m", "vice.kwin_gsr_bridge"]  # type: ignore[attr-defined]
     _register_capture(proc.pid, cmd)
     return proc
 
@@ -1492,7 +1523,16 @@ async def _terminate_group(proc: asyncio.subprocess.Process, timeout: float = 5.
     reaped, which is exactly the case that used to strand gsr-kms-server.
     """
     inner = _flatpak_recorder_pid(proc.pid) if getattr(proc, "vice_flatpak", False) is True else None
-    _signal_group(proc, signal.SIGTERM)
+    if getattr(proc, "vice_kwin_bridge", False) is True:
+        # The adapter must finish GSR before closing its PipeWire source and
+        # private bus. Keep the whole group for the hard timeout/orphan reap.
+        if proc.returncode is None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    else:
+        _signal_group(proc, signal.SIGTERM)
     deadline = time.monotonic() + timeout
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -1832,7 +1872,7 @@ class Recorder(ABC):
 
         cmd += extra
         cmd += ["-o", str(out_path)]
-        return cmd
+        return _gsr_window_compat_command(cmd, rc, extra, window_override)
 
     @staticmethod
     def _ffmpeg_session_cmd(
@@ -2609,7 +2649,7 @@ class GSRRecorder(Recorder):
         # Output directory (gsr writes files here on SIGUSR1)
         self._out_dir.mkdir(parents=True, exist_ok=True)
         cmd += ["-o", str(self._out_dir)]
-        return cmd
+        return _gsr_window_compat_command(cmd, rc, extra, self.window_override)
 
     async def _try_start(self, cpu_encoder: bool, avoid_codec: Optional[str] = None) -> Optional[str]:
         """Spawn GSR. Returns None when it stayed up, else why it did not."""

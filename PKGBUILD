@@ -35,8 +35,9 @@ depends=(
 )
 optdepends=(
     'wf-recorder: Wayland fallback recording backend'
-    'kdotool: game detection on KDE Plasma Wayland'
-    'python-gobject: keyboard overlay'
+    'kdotool: game detection and window capture on KDE Plasma Wayland'
+    'python-dbus: KDE Plasma Wayland window capture'
+    'python-gobject: keyboard overlay and KDE Plasma Wayland window capture'
     'python-cairo: keyboard overlay'
     'gtk-layer-shell: keyboard overlay on Wayland'
 )

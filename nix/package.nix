@@ -13,6 +13,8 @@
   wmctrl,
   cloudflared,
   kdotool,
+  dbus,
+  wayland,
   withQtWebEngine ? true,
   extraRuntimePaths ? [ ],
 }:
@@ -29,6 +31,7 @@ let
     wmctrl
     cloudflared
     kdotool
+    dbus
   ] ++ extraRuntimePaths;
 in
 python3Packages.buildPythonApplication rec {
@@ -51,6 +54,8 @@ python3Packages.buildPythonApplication rec {
     tomli-w
     psutil
     pywebview
+    dbus-python
+    pygobject3
   ] ++ lib.optionals withQtWebEngine [ pyqt6 pyqt6-webengine qtpy ];
 
   nativeCheckInputs = [ python3Packages.unittestCheckHook ];
@@ -80,7 +85,8 @@ python3Packages.buildPythonApplication rec {
 
   postFixup = ''
     for bin in $out/bin/vice $out/bin/vice-app; do
-      wrapProgram $bin --prefix PATH : ${lib.makeBinPath runtimeDeps}
+      wrapProgram $bin --prefix PATH : ${lib.makeBinPath runtimeDeps} \
+        --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ wayland ]}
     done
   '';
 
