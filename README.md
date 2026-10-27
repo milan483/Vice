@@ -162,8 +162,10 @@ Game detection (filename tagging and Discord presence) works on X11, Hyprland, s
 
 **Game Capture on KDE Plasma Wayland.** With a recognized game pinned, Vice
 captures its KWin window through PipeWire and keeps using GPU Screen Recorder
-for encoding, audio, replay clips and sessions. This works for both native
-Wayland and XWayland game windows, without following focus to another app.
+for encoding, audio, replay clips and sessions, without following focus to
+another app. Runtime verification covers CachyOS (Arch-based), KDE Plasma
+Wayland, native GPU Screen Recorder, and both native Wayland and XWayland game
+windows. Other distributions, including NixOS, have not been runtime-tested.
 It requires the native `gpu-screen-recorder`, `kdotool`, `dbus-daemon`,
 libwayland-client, and Python's `dbus` and `gi` modules. On Arch/CachyOS, install
 `kdotool python-dbus python-gobject`; the remaining libraries normally come with
