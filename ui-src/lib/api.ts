@@ -1,4 +1,4 @@
-import type {Clip, Config, Highlight, Image, Playlist, Status} from './types';
+import type {AudioSourcesInfo, Clip, Config, Highlight, Image, Playlist, Status} from './types';
 
 /**
  * The daemon's local HTTP API. Every call is same-origin: the public server
@@ -164,7 +164,7 @@ export const api = {
     request<{backend: string; displays: unknown[]; warning: string | null}>(
       `/api/displays${backend ? `?backend=${encodeURIComponent(backend)}` : ''}`,
     ),
-  audioSources: () => request<{sources: unknown[]; warning: string | null}>('/api/audio-sources'),
+  audioSources: () => request<AudioSourcesInfo>('/api/audio-sources'),
 
   editorProject: () => request<unknown>('/api/editor/project'),
   saveEditorProject: (project: unknown) => post<unknown>('/api/editor/project', project),

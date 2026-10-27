@@ -18,6 +18,7 @@ Environment detection
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -898,6 +899,54 @@ def list_gsr_audio_sources() -> dict:
     return {"sources": deduped, "warning": warning}
 
 
+def _app_source_id(value) -> Optional[str]:
+    """Accept one explicit application selector, never a monitor or a mix."""
+    if (not isinstance(value, str) or not value.startswith("app:")
+            or not value[4:].strip() or "|" in value
+            or any(ord(char) < 32 for char in value)):
+        return None
+    return value
+
+
+def _application_mixer_layout(rc) -> tuple[list[str], bool]:
+    """Discover once per recorder start; explicit sources exclude disabled apps.
+
+    Remembered names remain selectors even while an app is stopped, allowing
+    it to join later if GSR supports that. Discovery never restarts capture.
+    """
+    apps: dict[str, str] = {}
+    if _captures_desktop_audio(rc):
+        prefix = _gsr_prefix()
+        if prefix is None:
+            raise RuntimeError("The application mixer requires gpu-screen-recorder.")
+        code, out = _run_command_capture([*prefix, "--list-application-audio"], timeout=3.0)
+        if code != 0:
+            raise RuntimeError("Cannot discover application audio for the mixer: " +
+                               (out.strip()[-300:] or "gpu-screen-recorder discovery failed"))
+        for source in _parse_gsr_audio_lines(out, "app"):
+            source_id = _app_source_id(source["id"])
+            if source_id:
+                apps.setdefault(source_id.casefold(), source_id)
+        for mapping in (getattr(rc, "audio_app_enabled", {}),
+                        getattr(rc, "audio_track_volumes", {})):
+            for source in mapping or {}:
+                source_id = _app_source_id(source)
+                if source_id:
+                    apps.setdefault(source_id.casefold(), source_id)
+    enabled = {str(key).casefold(): value for key, value in
+               (getattr(rc, "audio_app_enabled", {}) or {}).items()}
+    tracks = [source for key, source in apps.items() if enabled.get(key, True)]
+    if _captures_microphone(rc):
+        mic = _gsr_mic_source(rc)
+        if ("|" in mic or _classify_gsr_source(mic) != "input"
+                or any(ord(char) < 32 for char in mic)):
+            raise RuntimeError("The application mixer requires a microphone input source.")
+        tracks.append(mic)
+    # Keep the same layout for one application: a playable combined track
+    # first, followed by the editable source track.
+    return (["|".join(tracks), *tracks], True) if tracks else ([], False)
+
+
 def _resolve_display_option(rc, backend: str, override: Optional[str] = None) -> Optional[dict]:
     selected = _selected_display_id(rc, override)
     if not selected:
@@ -1655,6 +1704,9 @@ class Recorder(ABC):
         """Whether capture is believed to be live right now."""
         return self._running
 
+    def application_mixer_status(self) -> dict:
+        return {"active": False, "active_sources": []}
+
     @abstractmethod
     async def start(self) -> None: ...
 
@@ -2385,20 +2437,23 @@ async def _apply_volume_mix(path: Path, rc) -> None:
     tmp.replace(path)
 
 
-def _track_volumes(rc, layout: list[str], mixed: bool) -> list[float]:
+def _track_volumes(rc, layout: list[str], mixed: bool, *, app_mixer: bool = False) -> list[float]:
     """Gain for each separate track in *layout*, 1.0 for the combined one."""
     listed = {str(t).strip() for t in (getattr(rc, "audio_tracks", None) or [])}
     volumes = getattr(rc, "audio_track_volumes", None) or {}
+    if app_mixer:
+        volumes = {str(key).casefold(): value for key, value in volumes.items()}
     out: list[float] = []
     for i, track in enumerate(layout):
         if mixed and i == 0:
             out.append(1.0)
-        elif track not in listed:
+        elif (not app_mixer and track not in listed) or (app_mixer and not track.startswith("app:")):
             # The microphone added because capture_microphone is on.
             out.append(_mic_volume(rc))
         else:
             try:
-                out.append(max(0.0, min(float(volumes.get(track, 1.0)), 2.0)))
+                key = track.casefold() if app_mixer else track
+                out.append(max(0.0, min(float(volumes.get(key, 1.0)), 2.0)))
             except (TypeError, ValueError):
                 out.append(1.0)
     return out
@@ -2436,12 +2491,14 @@ _AUDIO_ENCODERS = {"opus": "libopus", "aac": "aac", "mp3": "libmp3lame", "flac":
 def _track_volume_cmd(
     path: Path, tmp: Path, layout: list[str], mixed: bool,
     volumes: list[float], codecs: list[tuple[str, int]],
+    mono_tracks: Optional[set[int]] = None,
 ) -> list[str]:
     """Re-level the separate tracks in place of the originals and, when the
     first track is the combined one, rebuild it from the re-levelled tracks
     so what players and Discord play is balanced too (#251). Video and any
     untouched track are stream-copied."""
-    changed = [abs(v - 1.0) > 0.01 and not (mixed and i == 0)
+    mono_tracks = mono_tracks or set()
+    changed = [(abs(v - 1.0) > 0.01 or i in mono_tracks) and not (mixed and i == 0)
                for i, v in enumerate(volumes)]
     members: set[int] = set()
     if mixed and any(changed):
@@ -2463,7 +2520,8 @@ def _track_volume_cmd(
         stereo = f"[0:a:{i}]aformat=channel_layouts=stereo"
         if changed[i]:
             outs = f"asplit=2[v{i}][m{i}]" if i in members else ""
-            graph.append(f"{stereo},volume={volume:g}" + (f",{outs}" if outs else f"[v{i}]"))
+            mono = f",{_MIC_MONO_PAN}" if i in mono_tracks else ""
+            graph.append(f"{stereo}{mono},volume={volume:g}" + (f",{outs}" if outs else f"[v{i}]"))
             labels[i] = f"v{i}"
         elif i in members:
             graph.append(f"{stereo}[m{i}]")
@@ -2489,25 +2547,36 @@ def _track_volume_cmd(
     return args + ["-y", str(tmp)]
 
 
-async def _apply_track_volumes(path: Path, rc) -> None:
-    """Apply the per-track volumes from Settings to a clip with separate
-    audio tracks, in place. Nothing runs at the defaults, and any failure,
-    or a clip whose tracks no longer match the settings, keeps the clip as
-    recorded."""
-    layout, mixed = _separate_track_layout(rc)
+async def _apply_track_volumes(
+    path: Path, rc, *, layout: Optional[list[str]] = None,
+    mixed: bool = False, app_mixer: bool = False,
+) -> None:
+    """Apply saved-clip gains using the capture layout. Mixer processing
+    failures raise so raw audio cannot be published as a successful save.
+    Legacy tracks retain their existing best-effort behavior."""
+    if layout is None:
+        layout, mixed = _separate_track_layout(rc)
     if not layout:
         return
-    volumes = _track_volumes(rc, layout, mixed)
-    if all(abs(v - 1.0) <= 0.01 for v in volumes):
+    volumes = _track_volumes(rc, layout, mixed, app_mixer=app_mixer)
+    mono_tracks = {
+        i for i, source in enumerate(layout)
+        if app_mixer and _mic_mono(rc) and source == _gsr_mic_source(rc)
+        and not (mixed and i == 0)
+    }
+    if all(abs(v - 1.0) <= 0.01 for v in volumes) and not mono_tracks:
         return
     codecs = await _audio_stream_codecs(path)
     if len(codecs) != len(layout):
+        if app_mixer:
+            raise RuntimeError("The clip's audio tracks do not match the application mixer capture layout.")
         log.info("Not applying track volumes to %s: it has %d audio tracks, "
                  "the settings describe %d", path.name, len(codecs), len(layout))
         return
     ext = path.suffix.lstrip(".") or "mp4"
     tmp = path.with_suffix(f".levels.{ext}")
-    cmd = _track_volume_cmd(path, tmp, layout, mixed, volumes, codecs)
+    cmd = _track_volume_cmd(path, tmp, layout, mixed, volumes, codecs, mono_tracks)
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -2516,13 +2585,26 @@ async def _apply_track_volumes(path: Path, rc) -> None:
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except asyncio.TimeoutError:
-        log.warning("Track volume pass timed out, keeping %s as recorded", path.name)
+        if proc is not None:
+            proc.kill()
+            await proc.wait()
+        log.warning("Track volume pass timed out for %s", path.name)
         tmp.unlink(missing_ok=True)
+        if app_mixer:
+            raise RuntimeError("The application audio volume pass timed out.")
         return
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        if app_mixer:
+            raise RuntimeError(f"The application audio volume pass could not run: {exc}") from exc
+        raise
     if proc.returncode != 0:
-        log.warning("Track volume pass failed, keeping %s as recorded: %s",
+        log.warning("Track volume pass failed for %s: %s",
                     path.name, stderr.decode(errors="replace").strip()[:300])
         tmp.unlink(missing_ok=True)
+        if app_mixer:
+            raise RuntimeError("The application audio volume pass failed: " +
+                               stderr.decode(errors="replace").strip()[-300:])
         return
     tmp.replace(path)
 
@@ -2542,6 +2624,7 @@ class GSRRecorder(Recorder):
         super().__init__(cfg)
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._out_dir = resolve_path(cfg.output.directory)
+        self._replay_dir = self._out_dir
         self._watch_task: Optional[asyncio.Task] = None
         # Kept so an unexpected death can say why instead of just "died".
         self._stderr_tail: deque[str] = deque(maxlen=12)
@@ -2557,6 +2640,10 @@ class GSRRecorder(Recorder):
         # pick one. Still GPU encoding, so it is worth telling the user apart
         # from the CPU fallback (#156).
         self.codec_fallback = False
+        self._capture_recording = None
+        self._mixer_active = False
+        self._capture_audio_layout: list[str] = []
+        self._capture_audio_mixed = False
 
     @property
     def name(self) -> str:
@@ -2565,9 +2652,18 @@ class GSRRecorder(Recorder):
     def is_healthy(self) -> bool:
         return self._running and self._proc is not None and self._proc.returncode is None
 
+    def application_mixer_status(self) -> dict:
+        active = self._mixer_active and self.is_healthy()
+        return {
+            "active": active,
+            "active_sources": [source for source in self._capture_audio_layout[1:]
+                               if source.startswith("app:")] if active else [],
+        }
+
     def _build_cmd(self, cpu_encoder: bool = False, avoid_codec: Optional[str] = None) -> list[str]:
-        rc = self.cfg.recording
-        extra = _gsr_sanitize_args(_extra_gsr_args(rc.gsr_args), {"-o"})
+        rc = self._capture_recording or self.cfg.recording
+        blocked = {"-o", "-a"} if self._mixer_active else {"-o"}
+        extra = _gsr_sanitize_args(_extra_gsr_args(rc.gsr_args), blocked)
         cmd = _gsr_prefix() or ["gpu-screen-recorder"]
 
         # Allow manual overrides through recording.gsr_args.
@@ -2598,7 +2694,10 @@ class GSRRecorder(Recorder):
         if not cpu_encoder:
             cmd += _gsr_codec_args(rc, extra, avoid_codec)
 
-        if not _gsr_has_any_flag(extra, "-a"):
+        if self._mixer_active:
+            for source in self._capture_audio_layout:
+                cmd += ["-a", source]
+        elif not _gsr_has_any_flag(extra, "-a"):
             cmd += _gsr_audio_args(rc)
 
         if cpu_encoder and not _gsr_has_any_flag(extra, "-encoder"):
@@ -2607,8 +2706,8 @@ class GSRRecorder(Recorder):
         cmd += extra
 
         # Output directory (gsr writes files here on SIGUSR1)
-        self._out_dir.mkdir(parents=True, exist_ok=True)
-        cmd += ["-o", str(self._out_dir)]
+        self._replay_dir.mkdir(parents=True, exist_ok=True)
+        cmd += ["-o", str(self._replay_dir)]
         return cmd
 
     async def _try_start(self, cpu_encoder: bool, avoid_codec: Optional[str] = None) -> Optional[str]:
@@ -2634,6 +2733,21 @@ class GSRRecorder(Recorder):
         return detail
 
     async def start(self) -> None:
+        # Audio stream order belongs to the running replay buffer, never to
+        # later source discovery or edited settings.
+        self._capture_recording = copy.deepcopy(self.cfg.recording)
+        self._mixer_active = bool(getattr(self._capture_recording, "audio_app_mixer", False))
+        # GSR writes raw, incomplete, and stop-flushed media here as well.
+        # Only fully processed mixer clips are promoted into the library.
+        self._replay_dir = self._out_dir / ".audio-failed" if self._mixer_active else self._out_dir
+        if self._mixer_active:
+            self._capture_audio_layout, self._capture_audio_mixed = await asyncio.to_thread(
+                _application_mixer_layout, self._capture_recording
+            )
+        else:
+            self._capture_audio_layout, self._capture_audio_mixed = _separate_track_layout(
+                self._capture_recording
+            )
         self._running = True
         self.cpu_fallback = False
         self.cpu_fallback_reason = None
@@ -2743,13 +2857,29 @@ class GSRRecorder(Recorder):
             log.error("GSR process is not running")
             return None
         clip_duration = int(duration or self.cfg.recording.clip_duration)
+        # One gain snapshot applies to this complete clip, even if sliders
+        # change while GSR or FFmpeg is writing it.
+        audio_settings = copy.deepcopy(self._capture_recording or self.cfg.recording)
+        audio_settings.audio_track_volumes = copy.deepcopy(self.cfg.recording.audio_track_volumes)
+        audio_settings.microphone_volume = self.cfg.recording.microphone_volume
+        audio_settings.desktop_volume = self.cfg.recording.desktop_volume
+        audio_layout = list(self._capture_audio_layout)
+        audio_mixed = self._capture_audio_mixed
+        app_mixer = self._mixer_active
+        processing_dir = self._replay_dir
+        if app_mixer:
+            try:
+                processing_dir.mkdir(exist_ok=True)
+            except OSError as exc:
+                self.last_clip_error = f"Cannot prepare application audio processing: {exc}"
+                return None
 
         # Snapshot the directory immediately before triggering the flush.
         # Diffing against a baseline captured at recorder start misattributed
         # files that appeared in between (a finished session recording, a clip
         # renamed in the UI, a late flush from a timed-out save) as the new
         # replay, the wrong clip then got renamed, trimmed, and shown.
-        baseline = _media_file_names(self._out_dir)
+        baseline = _media_file_names(self._replay_dir)
 
         target = await _recorder_pid(self._proc)
         if target is None:
@@ -2777,10 +2907,10 @@ class GSRRecorder(Recorder):
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             await asyncio.sleep(0.25)
-            current = _media_file_names(self._out_dir)
+            current = _media_file_names(self._replay_dir)
             new = _gsr_replay_candidates(current, baseline)
             if new:
-                newest = max((self._out_dir / n for n in new), key=_mtime)
+                newest = max((self._replay_dir / n for n in new), key=_mtime)
                 if not await _wait_for_finalized_clip(newest):
                     # The file has stopped changing by now, so one more probe
                     # is cheap and is the only way to learn why it cannot be
@@ -2790,8 +2920,9 @@ class GSRRecorder(Recorder):
                     # An empty reason means ffprobe read the file and simply
                     # found no duration, which is not the same as corrupt.
                     why = why or "it reads, but reports no duration"
+                    location = str(newest) if app_mixer else newest.name
                     self.last_clip_error = (
-                        f"{newest.name} was written but cannot be read: {why}."
+                        f"{location} was written but cannot be read: {why}."
                         " The file is still there, nothing was deleted."
                     )
                     log.error(
@@ -2808,14 +2939,37 @@ class GSRRecorder(Recorder):
                     tag=await self._clip_tag(),
                     template=self._clip_name_template(),
                 )
-                newest.rename(seq_path)
-                newest = seq_path
+                # Mixer work stays outside the library until all requested
+                # gains have succeeded, including partial FFmpeg outputs.
+                work_path = seq_path
+                if app_mixer:
+                    work_path = processing_dir / seq_path.name
+                    if work_path.exists():
+                        work_path = processing_dir / f"{seq_path.stem}-{time.time_ns()}{seq_path.suffix}"
+                newest.rename(work_path)
+                newest = work_path
                 # GSR saves the entire buffer; trim to the requested clip duration.
                 trimmed = await _trim_to_last_n_seconds(newest, clip_duration)
-                await _apply_volume_mix(trimmed, self.cfg.recording)
-                await _apply_track_volumes(trimmed, self.cfg.recording)
+                try:
+                    if not app_mixer:
+                        await _apply_volume_mix(trimmed, audio_settings)
+                    await _apply_track_volumes(
+                        trimmed, audio_settings, layout=audio_layout,
+                        mixed=audio_mixed, app_mixer=app_mixer,
+                    )
+                except (RuntimeError, OSError) as exc:
+                    if not app_mixer:
+                        raise
+                    # Keep unprocessed audio out of the library on the next
+                    # scan as well as this save. Retain it for recovery.
+                    self.last_clip_error = f"Clip audio processing failed: {exc} Raw recording retained at {trimmed}."
+                    log.error("%s", self.last_clip_error)
+                    return None
                 if self.cfg.recording.apply_watermark:
                     await _apply_watermark(trimmed)
+                if app_mixer:
+                    trimmed.replace(seq_path)
+                    trimmed = seq_path
                 log.info("Clip saved: %s", trimmed)
                 self._emit(trimmed)
                 return trimmed

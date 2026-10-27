@@ -126,6 +126,9 @@ export interface UpdateInfo {
 
 export interface Config {
   recording: Record<string, unknown> & {
+    audio_app_mixer?: boolean;
+    audio_app_enabled?: Record<string, boolean>;
+    audio_track_volumes?: Record<string, number>;
     buffer_duration: number;
     clip_duration: number;
     fps: number;
@@ -186,3 +189,10 @@ export function imageTitle(image: Image): string {
 export const IMAGE_PREFIX = 'img:';
 
 export const imageSlug = (slug: string) => `${IMAGE_PREFIX}${slug}`;
+
+/** Live capture state is separate from configured application preferences. */
+export interface AudioSourcesInfo {
+  sources: Array<{id: string; label?: string; kind?: string}>;
+  warning?: string | null;
+  application_mixer?: {active_sources: string[]; active: boolean};
+}

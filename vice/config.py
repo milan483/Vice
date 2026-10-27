@@ -166,6 +166,10 @@ class RecordingConfig:
     # source id in audio_tracks: 1.0 = unchanged, up to 2.0. Missing means
     # 1.0. The microphone added on its own track uses microphone_volume.
     audio_track_volumes: dict[str, float] = field(default_factory=dict)
+    # Opt-in application mixer for GSR replay clips. Sessions keep their
+    # existing source configuration. Missing app identities default to on.
+    audio_app_mixer: bool = False
+    audio_app_enabled: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -515,6 +519,22 @@ def clamp_recording_limits(cfg: Config) -> None:
         log.warning("recording.color_depth=%r is unknown, using 8", depth)
         depth = "8"
     rc.color_depth = depth
+
+    mixer = getattr(rc, "audio_app_mixer", False)
+    rc.audio_app_mixer = mixer if isinstance(mixer, bool) else False
+    enabled = getattr(rc, "audio_app_enabled", {})
+    clean_enabled: dict[str, bool] = {}
+    if isinstance(enabled, dict):
+        for source, value in enabled.items():
+            if (isinstance(source, str) and source.startswith("app:")
+                    and source[4:].strip() and "|" not in source
+                    and not any(ord(char) < 32 for char in source)
+                    and isinstance(value, bool)):
+                # GSR application names are case insensitive. A disabled
+                # identity wins if a hand-edited config contains aliases.
+                key = source.casefold()
+                clean_enabled[key] = clean_enabled.get(key, True) and value
+    rc.audio_app_enabled = clean_enabled
 
     volumes = getattr(rc, "audio_track_volumes", None)
     if not isinstance(volumes, dict):

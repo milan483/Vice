@@ -244,6 +244,7 @@ class ViceDaemon:
             self.share.trigger_clip_cb = self._handle_clip_hotkey
             self.share.check_update_cb = lambda: self.run_update_check(force=True)
             self.share.get_status_cb   = self._get_status
+            self.share.audio_mixer_status_cb = lambda: self.recorder.application_mixer_status()
             self.share.apply_config_cb = self._apply_live_config
             self.share.key_overlay_move_cb = self.key_overlay.set_moving
             try:
@@ -444,6 +445,15 @@ class ViceDaemon:
         recorder, so moving one must not restart it and empty the buffer."""
         recording = asdict(self.cfg.recording)
         recording.pop("audio_track_volumes", None)
+        if self.recorder.name != "gpu-screen-recorder":
+            recording.pop("audio_app_mixer", None)
+            recording.pop("audio_app_enabled", None)
+        elif not recording.get("audio_app_mixer"):
+            recording.pop("audio_app_enabled", None)
+        else:
+            # The mixer always records separate sources; microphone gain is
+            # also applied to the complete clip when it is saved.
+            recording.pop("microphone_volume", None)
         return json.dumps(recording, sort_keys=True)
 
     def _clips_in_library(self) -> int:

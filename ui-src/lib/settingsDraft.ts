@@ -37,6 +37,8 @@ export interface Draft {
   desktopVolume: number;
   /** Percent per separate track, keyed by source id. Missing means 100. */
   audioTrackVolumes: Record<string, number>;
+  audioAppMixer: boolean;
+  audioAppEnabled: Record<string, boolean>;
   micVolume: number;
   notifyVolume: number;
   sounds: Record<SoundKey, string>;
@@ -156,6 +158,14 @@ export function draftFromConfig(config: Config): Draft {
           : {},
       ).map(([id, v]) => [id, Math.round(num(v, 1) * 100)]),
     ),
+    audioAppMixer: r.audio_app_mixer === true,
+    audioAppEnabled: Object.fromEntries(
+      Object.entries(
+        r.audio_app_enabled && typeof r.audio_app_enabled === 'object'
+          ? (r.audio_app_enabled as Record<string, unknown>)
+          : {},
+      ).filter(([id, enabled]) => id.startsWith('app:') && typeof enabled === 'boolean'),
+    ) as Record<string, boolean>,
     mixFirstTrack: Boolean(r.audio_tracks_mix_first),
     wfMicStrategy: str(r.wf_microphone_strategy, 'prompt'),
 
@@ -250,8 +260,10 @@ export function patchFromDraft(draft: Draft): Record<string, Record<string, unkn
       gsr_audio_source: draft.desktopSource || 'default_output',
       audio_tracks: [...draft.audioTracks],
       audio_track_volumes: Object.fromEntries(
-        draft.audioTracks.map(id => [id, (draft.audioTrackVolumes[id] ?? 100) / 100]),
+        Object.entries(draft.audioTrackVolumes).map(([id, percent]) => [id, percent / 100]),
       ),
+      audio_app_mixer: draft.audioAppMixer,
+      audio_app_enabled: {...draft.audioAppEnabled},
       audio_tracks_mix_first: draft.mixFirstTrack,
       gsr_args: draft.gsrArgs.trim(),
     },

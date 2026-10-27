@@ -983,5 +983,28 @@
         "body": "Vice is now available in French, German and Brazilian Portuguese. Pick a language in Settings, Appearance."
       }
     }
+  },
+  "appMixer": {
+    "title": "Application audio mixer",
+    "help": "Control each application separately in GSR replay clips. Off by default.",
+    "scope": "Available for GSR replay recording. Sessions and other backends use your regular audio settings.",
+    "applications": "Applications",
+    "discoveryHelp": "Applications appear while they play audio. New applications are enabled by default.",
+    "tracksHelp": "Records applications directly instead of desktop output, with a combined first track and separate application tracks. Microphone capture keeps its own controls.",
+    "restartHelp": "Apply after changing the mixer or an application switch restarts the recorder and clears replay history. Newly detected applications wait for the next recorder restart.",
+    "levelHelp": "Volume changes apply without a restart to the whole next saved replay, including audio already buffered. Turning an application off keeps its volume preference.",
+    "empty": "No applications detected yet. Play audio in an application to see it here.",
+    "desktopOff": "Turn on Capture desktop audio to include applications in replay clips.",
+    "enabledAria": "Include {name} audio",
+    "decreaseAria": "Decrease {name} volume by 5%",
+    "increaseAria": "Increase {name} volume by 5%",
+    "offOnApply": "Turns off on Apply",
+    "off": "Off",
+    "desktopDisabled": "Desktop audio is off",
+    "capturing": "Included in current capture",
+    "notPlaying": "Ready to capture when audio returns",
+    "pending": "Pending capture until next recorder restart",
+    "absent": "Not detected; preference remembered",
+    "appliedRestart": "Recorder restarted. Replay history was cleared."
   }
 }

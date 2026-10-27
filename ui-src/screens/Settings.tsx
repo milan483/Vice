@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 
 import {api} from '../lib/api';
-import type {KeyOverlayState} from '../lib/types';
+import type {AudioSourcesInfo, KeyOverlayState} from '../lib/types';
 import {formatLengthLong} from '../lib/format';
 import {availableLocales, currentLocale, setLocale, t, tNode} from '../lib/i18n';
 import {LOCALE_LABELS, type LocaleName} from '../locales';
@@ -34,6 +34,7 @@ import {AccentPicker} from '../components/AccentPicker';
 import {useAccentChoice} from '../lib/accentChoice';
 import {customAccent as deriveCustom} from '../theme/viceTheme';
 import {AudioTracks, type AudioSource} from '../components/settings/AudioTracks';
+import {ApplicationMixer} from '../components/settings/ApplicationMixer';
 import {KeyCapture} from '../components/settings/KeyCapture';
 import {
   Row,
@@ -76,7 +77,7 @@ export function Settings() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [baseline, setBaseline] = useState<string>('');
   const [displays, setDisplays] = useState<DisplayInfo>({displays: [], warning: null});
-  const [sources, setSources] = useState<{sources: AudioSource[]; warning?: string | null}>({
+  const [sources, setSources] = useState<AudioSourcesInfo>({
     sources: [],
   });
   const [trackPick, setTrackPick] = useState('');
@@ -89,6 +90,7 @@ export function Settings() {
   const [, forceEffectsNote] = useState(0);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
+  const sourceLoad = useRef<Promise<void> | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const sectionRefs = useRef(new Map<SectionId, HTMLElement>());
   // Set while the rail is scrolling somewhere, so scroll-spy does not fight it.
@@ -130,17 +132,21 @@ export function Settings() {
     }
   }, []);
 
-  const loadSources = useCallback(async () => {
-    try {
-      const info = await api.audioSources();
-      setSources(info as unknown as {sources: AudioSource[]; warning?: string | null});
-      setTrackPick(prev => prev || (info.sources as AudioSource[])[0]?.id || '');
-    } catch {
-      setSources({
-        sources: [{id: 'default_output', label: t('settings.defaultOutput')}],
-        warning: t('settings.sourceLoadFailed'),
-      });
-    }
+  const loadSources = useCallback(() => {
+    if (sourceLoad.current) return sourceLoad.current;
+    const pending = (async () => {
+      try {
+        const info = await api.audioSources();
+        setSources(info);
+        setTrackPick(prev => prev || info.sources[0]?.id || '');
+      } catch {
+        setSources(prev => ({...prev, warning: t('settings.sourceLoadFailed')}));
+      }
+    })().finally(() => {
+      sourceLoad.current = null;
+    });
+    sourceLoad.current = pending;
+    return pending;
   }, []);
 
   useEffect(() => {
@@ -152,7 +158,17 @@ export function Settings() {
   }, [draft?.backend, loadDisplays]);
 
   useEffect(() => {
-    void loadSources();
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (document.visibilityState !== 'hidden') await loadSources();
+      if (!disposed) timer = setTimeout(() => { void poll(); }, 5000);
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
   }, [loadSources]);
 
   // Scroll-spy: whichever section heading is nearest the top of the scroller
@@ -269,6 +285,10 @@ export function Settings() {
     );
   };
 
+  const applicationMixerSupported = draft.backend === 'gsr' ||
+    (draft.backend === 'auto' && status.backend === 'gpu-screen-recorder');
+  const showApplicationMixer = draft.audioAppMixer && applicationMixerSupported && !status.session_active;
+
   const save = async () => {
     if (resolvedResolution(draft) === false) {
       notify({
@@ -293,6 +313,12 @@ export function Settings() {
       Number(patch.sharing.port) !== Number(config?.sharing?.port ?? 8765) ||
       Boolean(patch.sharing.cloudflare_tunnel) !== Boolean(config?.sharing?.cloudflare_tunnel !== false);
 
+    const previousRecording = JSON.parse(baseline).recording as Record<string, unknown>;
+    const previousEnabled = (previousRecording.audio_app_enabled ?? {}) as Record<string, boolean>;
+    const mixerChanged = applicationMixerSupported && !status.session_active && (
+      draft.audioAppMixer !== (previousRecording.audio_app_mixer === true) ||
+      (draft.audioAppMixer && JSON.stringify(patch.recording.audio_app_enabled) !== JSON.stringify(previousEnabled))
+    );
     setSaving(true);
     try {
       const result = await saveConfig(patch);
@@ -307,13 +333,14 @@ export function Settings() {
       } else {
         say(
           t('settings.saved'),
-          corrected
-            ? t('settings.bufferRaised', {length: formatLengthLong(buffer)})
-            : undefined,
+          mixerChanged
+            ? t('appMixer.appliedRestart')
+            : corrected ? t('settings.bufferRaised', {length: formatLengthLong(buffer)}) : undefined,
         );
       }
       if (result.restart_required && sharingChanged) setRestartNeeded(true);
       setBaseline(JSON.stringify(patch));
+      void loadSources();
     } catch (err) {
       fail(t('settings.errSave'), err);
     } finally {
@@ -589,6 +616,32 @@ export function Settings() {
 
         {/* ── Audio ─────────────────────────────────────────────── */}
         <Card id="audio" title={t('settings.secAudio')} register={register('audio')}>
+          <Row
+            label={t('appMixer.title')}
+            help={t('appMixer.help')}
+            note={!applicationMixerSupported || status.session_active
+              ? {text: t('appMixer.scope'), tone: 'plain'}
+              : {text: t('appMixer.restartHelp'), tone: 'warning'}}>
+            <Toggle
+              label={t('appMixer.title')}
+              checked={draft.audioAppMixer}
+              disabled={!applicationMixerSupported || status.session_active}
+              onChange={audioAppMixer => update({audioAppMixer})}
+            />
+          </Row>
+          {showApplicationMixer ? (
+            <Row label={t('appMixer.applications')} stack help={t('appMixer.discoveryHelp')}>
+              <ApplicationMixer
+                sources={sources}
+                enabled={draft.audioAppEnabled}
+                volumes={draft.audioTrackVolumes}
+                captureAudio={draft.captureAudio}
+                switchesDisabled={saving}
+                onEnabledChange={(id, enabled) => update({audioAppEnabled: {...draft.audioAppEnabled, [id]: enabled}})}
+                onVolumeChange={(id, percent) => update({audioTrackVolumes: {...draft.audioTrackVolumes, [id]: percent}})}
+              />
+            </Row>
+          ) : null}
           <Row label={t('settings.captureDesktopAudio')} help={t('settings.captureDesktopAudioHelp')}>
             <Toggle
               label={t('settings.captureDesktopAudio')}
@@ -610,14 +663,16 @@ export function Settings() {
             />
           </Row>
 
-          <Row label={t('settings.desktopSource')} note={desktopSourceNote(draft, sources)}>
-            <Select
-              label={t('settings.desktopSource')}
-              value={draft.desktopSource}
-              onChange={desktopSource => update({desktopSource})}
-              options={groupedSourceOptions(draft.desktopSource, sources.sources)}
-            />
-          </Row>
+          {!showApplicationMixer ? (
+            <Row label={t('settings.desktopSource')} note={desktopSourceNote(draft, sources)}>
+              <Select
+                label={t('settings.desktopSource')}
+                value={draft.desktopSource}
+                onChange={desktopSource => update({desktopSource})}
+                options={groupedSourceOptions(draft.desktopSource, sources.sources)}
+              />
+            </Row>
+          ) : null}
 
           <Row
             label={t('settings.micSource')}
@@ -642,7 +697,7 @@ export function Settings() {
 
           {/* Separate tracks keep their own levels, so the balance sliders
               would be claiming an effect they do not have. */}
-          {draft.audioTracks.length === 0 ? (
+          {!showApplicationMixer && draft.audioTracks.length === 0 ? (
             <>
               <Row label={t('settings.desktopVolume')} help={t('settings.desktopVolumeHelp')}>
                 <Slider
@@ -671,6 +726,13 @@ export function Settings() {
             </>
           ) : null}
 
+          {showApplicationMixer ? (
+            <Row label={t('settings.micVolume')} help={t('settings.micVolumeHelp')}>
+              <Slider label={t('settings.micVolume')} value={draft.micVolume} min={0} max={200} step={5}
+                onChange={micVolume => update({micVolume})} format={v => `${v}%`} />
+            </Row>
+          ) : null}
+
           <Row
             label={t('settings.notifyVolume')}
             help={t('settings.notifyVolumeHelp')}>
@@ -696,57 +758,61 @@ export function Settings() {
             />
           </Row>
 
-          <Row
-            label={t('settings.audioTracks')}
-            stack
-            help={t('settings.audioTracksHelp')}>
-            <AudioTracks
-              tracks={draft.audioTracks}
-              sources={sources.sources}
-              mixFirst={draft.mixFirstTrack}
-              desktopAudioOn={draft.captureAudio}
-              pick={trackPick}
-              onPickChange={setTrackPick}
-              onChange={audioTracks => update({audioTracks})}
-              volumes={draft.audioTrackVolumes}
-              onVolumeChange={(id, percent) =>
-                update({audioTrackVolumes: {...draft.audioTrackVolumes, [id]: percent}})
-              }
-              micTrack={
-                draft.captureMic &&
-                !draft.audioTracks.some(track =>
-                  track.split('|').includes(draft.micSource || 'default_input'),
-                )
-                  ? {value: draft.micVolume, onChange: micVolume => update({micVolume})}
-                  : null
-              }
-              refreshing={refreshing}
-              onDuplicate={() =>
-                notify({
-                  kind: 'error',
-                  title: t('settings.duplicateTrack'),
-                  tone: 'error',
-                  holdMs: 3500,
-                })
-              }
-              onRefresh={() => {
-                setRefreshing(true);
-                void loadSources()
-                  .then(() => say(t('settings.sourcesRefreshed')))
-                  .finally(() => setRefreshing(false));
-              }}
-            />
-          </Row>
+          {!showApplicationMixer ? (
+            <>
+              <Row
+                label={t('settings.audioTracks')}
+                stack
+                help={t('settings.audioTracksHelp')}>
+                <AudioTracks
+                  tracks={draft.audioTracks}
+                  sources={sources.sources}
+                  mixFirst={draft.mixFirstTrack}
+                  desktopAudioOn={draft.captureAudio}
+                  pick={trackPick}
+                  onPickChange={setTrackPick}
+                  onChange={audioTracks => update({audioTracks})}
+                  volumes={draft.audioTrackVolumes}
+                  onVolumeChange={(id, percent) =>
+                    update({audioTrackVolumes: {...draft.audioTrackVolumes, [id]: percent}})
+                  }
+                  micTrack={
+                    draft.captureMic &&
+                    !draft.audioTracks.some(track =>
+                      track.split('|').includes(draft.micSource || 'default_input'),
+                    )
+                      ? {value: draft.micVolume, onChange: micVolume => update({micVolume})}
+                      : null
+                  }
+                  refreshing={refreshing}
+                  onDuplicate={() =>
+                    notify({
+                      kind: 'error',
+                      title: t('settings.duplicateTrack'),
+                      tone: 'error',
+                      holdMs: 3500,
+                    })
+                  }
+                  onRefresh={() => {
+                    setRefreshing(true);
+                    void loadSources()
+                      .then(() => say(t('settings.sourcesRefreshed')))
+                      .finally(() => setRefreshing(false));
+                  }}
+                />
+              </Row>
 
-          <Row
-            label={t('settings.mixFirstTrack')}
-            help={t('settings.mixFirstTrackHelp')}>
-            <Toggle
-              label={t('settings.mixFirstTrack')}
-              checked={draft.mixFirstTrack}
-              onChange={mixFirstTrack => update({mixFirstTrack})}
-            />
-          </Row>
+              <Row
+                label={t('settings.mixFirstTrack')}
+                help={t('settings.mixFirstTrackHelp')}>
+                <Toggle
+                  label={t('settings.mixFirstTrack')}
+                  checked={draft.mixFirstTrack}
+                  onChange={mixFirstTrack => update({mixFirstTrack})}
+                />
+              </Row>
+            </>
+          ) : null}
 
           <Row
             label={t('settings.wfMicMode')}

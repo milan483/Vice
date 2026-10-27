@@ -919,3 +919,62 @@ select option {
   line-height: 1.55;
   color: var(--color-error);
 }
+
+.app-mixer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+.app-mixer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3);
+  border-radius: var(--radius-inner);
+  background: var(--recessed);
+}
+
+.app-mixer-name {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.app-mixer-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-mixer-name span {
+  color: var(--color-text-disabled);
+  font-size: 12px;
+}
+
+.app-mixer-volume {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+
+.app-mixer-volume .btn {
+  min-width: 32px;
+  padding-inline: 8px;
+}
+
+.app-mixer-volume output {
+  min-width: 5ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+@media (max-width: 560px) {
+  .app-mixer-row { flex-wrap: wrap; }
+  .app-mixer-name { flex-basis: calc(100% - 64px); }
+  .app-mixer-volume { margin-left: auto; }
+}

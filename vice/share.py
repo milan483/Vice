@@ -61,7 +61,7 @@ from .runtime import actual_home_dir, load_user_systemd_env, resolve_path
 log = logging.getLogger("vice.share")
 
 # Config maps whose keys are user data rather than field names.
-FREE_MAP_KEYS = frozenset({"audio_track_volumes"})
+FREE_MAP_KEYS = frozenset({"audio_track_volumes", "audio_app_enabled"})
 UI_VERSION_TOKEN = "__VICE_VERSION__"
 
 
@@ -1092,6 +1092,7 @@ class ShareServer:
         self.check_update_cb: Optional[Callable[[], Coroutine]] = None
         # Injected so /api/status can report live state
         self.get_status_cb: Optional[Callable[[], dict]] = None
+        self.audio_mixer_status_cb: Optional[Callable[[], dict]] = None
         # Injected so config changes can be applied without restart when possible.
         self.apply_config_cb: Optional[Callable[[], Coroutine]] = None
         # Injected so Settings can put the keyboard overlay into move mode.
@@ -2681,6 +2682,10 @@ class ShareServer:
     async def _api_get_audio_sources(self, _: web.Request) -> web.Response:
         payload = await asyncio.to_thread(list_gsr_audio_sources)
         payload["selected"] = self.cfg.recording.gsr_audio_source
+        payload["application_mixer"] = (
+            self.audio_mixer_status_cb() if self.audio_mixer_status_cb else
+            {"active": False, "active_sources": []}
+        )
         return web.json_response(payload)
 
     async def _api_set_config(self, req: web.Request) -> web.Response:
