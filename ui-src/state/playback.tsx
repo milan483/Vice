@@ -15,13 +15,15 @@ import {clipTitle, type Clip, type Highlight} from '../lib/types';
 import {Modal} from '../components/Modal';
 import {ShareModal} from '../components/ShareModal';
 import {TrimModal} from '../components/TrimModal';
-import {Viewer} from '../components/Viewer';
+import {Viewer, type HighlightUpdate} from '../components/Viewer';
 import {useRenameClip} from './clipActions';
 import {useStore} from './store';
 import {t} from '../lib/i18n';
+import {snapshotQueue, resolveQueue, renameInQueue} from './playbackQueue';
 
 interface Playback {
-  openViewer: (slug: string) => void;
+  openViewer: (slug: string, originatingSlugs?: readonly string[]) => void;
+  renameClip: (clip: Clip, name: string) => Promise<Clip | null>;
   openTrim: (slug: string) => void;
   openShare: (slug: string) => void;
 }
@@ -37,9 +39,29 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
   const {state, notify, refreshClips} = useStore();
   const {clips} = state;
 
+  const [queueSlugs, setQueueSlugs] = useState<string[]>([]);
   const [viewerSlug, setViewerSlug] = useState<string | null>(null);
   const [trimSlug, setTrimSlug] = useState<string | null>(null);
-  const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [highlightState, setHighlightState] = useState<{slug: string | null; list: Highlight[]}>({
+    slug: null,
+    list: [],
+  });
+  // Never render the previous clip's markers while the next request is pending.
+  const highlights = highlightState.slug === viewerSlug ? highlightState.list : [];
+  const highlightRevision = useRef(0);
+  const setHighlights = useCallback(
+    (update: HighlightUpdate) => {
+      highlightRevision.current += 1;
+      setHighlightState(current => ({
+        slug: viewerSlug,
+        list:
+          typeof update === 'function'
+            ? update(current.slug === viewerSlug ? current.list : [])
+            : update,
+      }));
+    },
+    [viewerSlug],
+  );
   const [confirmDelete, setConfirmDelete] = useState<Clip | null>(null);
   const [manualCopy, setManualCopy] = useState<string | null>(null);
   const [shareSlug, setShareSlug] = useState<string | null>(null);
@@ -48,29 +70,50 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
   const trimClip = clips.find(c => c.slug === trimSlug) ?? null;
   const shareClip = clips.find(c => c.slug === shareSlug) ?? null;
 
-  const openViewer = useCallback((slug: string) => {
-    // Card previews keep decoding behind the scrim otherwise, and they are
-    // muted, so nothing on screen would explain the extra load.
-    document.querySelectorAll<HTMLVideoElement>('video.clip-preview').forEach(v => v.pause());
-    setViewerSlug(slug);
-  }, []);
+  const viewerClips = useMemo(() => resolveQueue(queueSlugs, clips), [queueSlugs, clips]);
+
+  const openViewer = useCallback(
+    (slug: string, originatingSlugs?: readonly string[]) => {
+      // Card previews keep decoding behind the scrim otherwise, and they are
+      // muted, so nothing on screen would explain the extra load.
+      document.querySelectorAll<HTMLVideoElement>('video.clip-preview').forEach(v => v.pause());
+      setQueueSlugs(snapshotQueue(slug, originatingSlugs ?? clips.map(clip => clip.slug)));
+      setViewerSlug(slug);
+    },
+    [clips],
+  );
 
   const openTrim = useCallback((slug: string) => setTrimSlug(slug), []);
 
   // Highlights belong to the clip on screen, so they reload whenever it does.
   useEffect(() => {
     if (!viewerSlug) {
-      setHighlights([]);
+      setHighlightState({slug: null, list: []});
       return;
     }
     let cancelled = false;
-    void api
-      .highlights(viewerSlug)
-      .then(list => !cancelled && setHighlights(list))
-      .catch(err => {
+    const load = async (): Promise<void> => {
+      const revision = highlightRevision.current;
+      try {
+        const list = await api.highlights(viewerSlug);
+        if (cancelled) return;
+        // A mutation completed after this GET took its snapshot. Read again
+        // rather than erasing it or losing marks that predated the new one.
+        if (revision !== highlightRevision.current) {
+          void load();
+          return;
+        }
+        setHighlightState({slug: viewerSlug, list});
+      } catch (err) {
         console.debug('Loading highlights failed', err);
-        if (!cancelled) setHighlights([]);
-      });
+        // Retain successful local mutations if the initial read fails.
+        if (!cancelled)
+          setHighlightState(current =>
+            current.slug === viewerSlug ? current : {slug: viewerSlug, list: []},
+          );
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
     };
@@ -84,7 +127,8 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
 
   // A clip deleted underneath the viewer, from anywhere, closes it.
   useEffect(() => {
-    const gone = (slug: string) => slug !== renamingFrom.current && !clips.some(c => c.slug === slug);
+    const gone = (slug: string) =>
+      slug !== renamingFrom.current && !clips.some(c => c.slug === slug);
     if (viewerSlug && gone(viewerSlug)) setViewerSlug(null);
     if (trimSlug && gone(trimSlug)) setTrimSlug(null);
     if (shareSlug && gone(shareSlug)) setShareSlug(null);
@@ -92,18 +136,20 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
 
   const renameClip = useRenameClip();
   const rename = useCallback(
-    (clip: Clip, name: string) => {
+    async (clip: Clip, name: string) => {
       renamingFrom.current = clip.slug;
-      void renameClip(clip, name)
-        .then(updated => {
-          if (!updated?.slug) return;
+      try {
+        const updated = await renameClip(clip, name);
+        if (updated?.slug) {
+          setQueueSlugs(current => renameInQueue(current, clip.slug, updated.slug));
           setViewerSlug(current => (current === clip.slug ? updated.slug : current));
           setTrimSlug(current => (current === clip.slug ? updated.slug : current));
           setShareSlug(current => (current === clip.slug ? updated.slug : current));
-        })
-        .finally(() => {
-          renamingFrom.current = null;
-        });
+        }
+        return updated;
+      } finally {
+        renamingFrom.current = null;
+      }
     },
     [renameClip],
   );
@@ -149,8 +195,8 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
   );
 
   const value = useMemo<Playback>(
-    () => ({openViewer, openTrim, openShare: setShareSlug}),
-    [openViewer, openTrim],
+    () => ({openViewer, openTrim, openShare: setShareSlug, renameClip: rename}),
+    [openViewer, openTrim, rename],
   );
 
   return (
@@ -159,13 +205,16 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
 
       <Viewer
         clip={viewerClip}
-        clips={clips}
+        clips={viewerClips}
         highlights={highlights}
         onHighlightsChange={setHighlights}
         onSelect={setViewerSlug}
         onClose={() => setViewerSlug(null)}
         onTrim={clip => setTrimSlug(clip.slug)}
         trimOpen={trimSlug !== null}
+        overlayOpen={
+          trimSlug !== null || shareSlug !== null || confirmDelete !== null || manualCopy !== null
+        }
         onRename={rename}
         onShare={share}
         onShareMenu={shareMenu}
@@ -210,11 +259,13 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
                   .deleteClip(clip.slug)
                   .then(() => say(t('viewer.clipDeleted')))
                   .catch(fail(t('viewer.errDelete')));
-              }}>
+              }}
+            >
               {t('common.delete')}
             </button>
           </>
-        }>
+        }
+      >
         <p>
           {t('viewer.confirmDeleteBody', {
             name: confirmDelete ? clipTitle(confirmDelete) : '',
@@ -222,7 +273,11 @@ export function PlaybackProvider({children}: {children: ReactNode}) {
         </p>
       </Modal>
 
-      <Modal open={manualCopy !== null} title={t('viewer.copyLinkTitle')} onClose={() => setManualCopy(null)}>
+      <Modal
+        open={manualCopy !== null}
+        title={t('viewer.copyLinkTitle')}
+        onClose={() => setManualCopy(null)}
+      >
         <p>{t('viewer.copyLinkBody')}</p>
         <textarea className="manual-copy" readOnly value={manualCopy ?? ''} rows={3} />
       </Modal>

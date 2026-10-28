@@ -19,7 +19,8 @@ function onKeyDown(e: KeyboardEvent) {
   // surface underneath it as well would throw the edit away and the surface
   // with it, so typing wins and the press stops here.
   const tag = (e.target as HTMLElement | null)?.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (tag === 'TEXTAREA' || (tag === 'INPUT' && (e.target as HTMLInputElement).type !== 'range'))
+    return;
   e.preventDefault();
   e.stopPropagation();
   stack[stack.length - 1]?.();

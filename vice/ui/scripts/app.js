@@ -58,7 +58,7 @@ Error generating stack: `+e.message+`
       <div class="ed-handle l" data-handle="l"><div class="ed-handle-bar"></div></div>
       <div class="ed-handle r" data-handle="r"><div class="ed-handle-bar"></div></div>
     </div>`:`<div class="ed-item ed-item-clip${i}${o}" ${c}>
-    ${l&&l.thumb_url?`<img src="${oe(l.thumb_url)}" loading="lazy" alt="" draggable="false">`:``}<div class="ed-item-shade"></div>
+    ${l&&l.thumb_url?`<img src="${ae(l.thumb_url)}" loading="lazy" alt="" draggable="false">`:``}<div class="ed-item-shade"></div>
     <div class="ed-item-hd">
       <span class="ed-item-name">${ae(u)}</span>
       <span class="ed-item-dur">${ie(e.dur)}</span>
@@ -88,7 +88,7 @@ Error generating stack: `+e.message+`
         <span class="ed-rail-label">${ae(e.label)}</span>
         <span class="ed-rail-type">${e.type.slice(0,3).toUpperCase()}</span>
       </div>
-      <div class="ed-lane ${e.type}" data-lane="${oe(e.id)}" style="width:${n}px">
+      <div class="ed-lane ${e.type}" data-lane="${ae(e.id)}" style="width:${n}px">
         ${r}${i}
       </div>
     </div>`}).join(``);g.timelineCanvas.innerHTML=`
