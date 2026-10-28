@@ -51,7 +51,8 @@ from .keys import KeyRing, save_sidecar as save_key_sidecar
 from .media import cleanup_temp_files, probe_media
 from .overlay_host import KeyOverlayHost
 from .recorder import (GSRRecorder, capture_screenshot, create_recorder, filename_tag,
-                       gsr_flatpak_installed, gsr_source, reap_orphaned_captures)
+                       gsr_flatpak_installed, gsr_source, gsr_supports_kwin_capture,
+                       reap_orphaned_captures)
 from .runtime import (
     actual_home_dir,
     claim_daemon_lock,
@@ -717,6 +718,13 @@ class ViceDaemon:
         old_cfg = copy.deepcopy(self.cfg)
 
         new_recorder = create_recorder(self.cfg)
+        if (self._window_capture_id and self._window_capture_id.startswith("kwin:")
+                and not gsr_supports_kwin_capture()):
+            # A source change can make an existing compatibility pin unusable
+            # (for example native -> Flatpak). Keep the upstream display path
+            # usable for both the replacement and a possible startup rollback.
+            self._window_capture_id = None
+            old_recorder.window_override = None
         self._wire_recorder(new_recorder)
 
         await old_recorder.stop()
@@ -852,6 +860,12 @@ class ViceDaemon:
                     # Asking X11 for focus again here would pin whatever the
                     # user tabbed to in between (Discord) under the game's name.
                     current = win.get("window_id")
+                    if current and current.startswith("kwin:") and not gsr_supports_kwin_capture():
+                        # The private KWin source adapter is native-only. Do
+                        # not repeatedly restart a Flatpak recorder for a pin
+                        # it cannot consume; keep its upstream display target.
+                        pending_switch = None
+                        continue
                     if not current or current == self._window_capture_id:
                         pending_switch = None
                         continue
