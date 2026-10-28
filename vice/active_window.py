@@ -27,9 +27,9 @@ from .runtime import actual_home_dir
 log = logging.getLogger(__name__)
 
 ActiveWindow = dict  # {"process": str, "class": str, "pid": int, "window_id": str | None}
-# window_id is the same id space as get_focused_window_id(); only the X11
-# adapter fills it, and it names the very window that was matched, so a
-# caller can pin capture without asking X11 for focus a second time.
+# X11 ids are passed directly to GSR. A `kwin:` id names a compositor window
+# served through the KDE compatibility adapter, never a monitor rectangle.
+# In both cases the id belongs to the same snapshot as the game match.
 
 
 def _read_proc_comm(pid: int) -> str:
@@ -185,20 +185,48 @@ def _active_window_geometry_niri() -> Optional[tuple[int, int]]:
 
 # ─── KDE Plasma / KWin ─────────────────────────────────────────────────────
 def _get_active_window_kde() -> Optional[ActiveWindow]:
-    pid_text = _run(["kdotool", "getactivewindow", "getwindowpid"]).strip()
+    # Resolve focus once. Re-querying getactivewindow for each field can pair
+    # a game's identity with the window the user just alt-tabbed to.
+    fields = _run([
+        "kdotool", "getactivewindow", "getwindowid", "getwindowpid",
+        "getwindowclassname",
+    ]).strip().splitlines()
+    window_id = None
+    if len(fields) >= 3 and re.fullmatch(r"\{?[0-9a-fA-F-]{36}\}?", fields[0]):
+        window_id, pid_text, cls = fields[:3]
+    else:
+        # Keep detection on older kdotool builds which cannot chain queries.
+        pid_text = _run(["kdotool", "getactivewindow", "getwindowpid"]).strip()
+        cls = _run(["kdotool", "getactivewindow", "getwindowclassname"]).strip()
     try:
         pid = int(pid_text) if pid_text else 0
     except ValueError:
         pid = 0
-
-    cls = _run(["kdotool", "getactivewindow", "getwindowclassname"]).strip()
 
     proc = _read_proc_comm(pid) if pid else ""
     if not (cls or proc):
         if os.environ.get("DISPLAY"):
             return _get_active_window_x11()
         return None
-    return {"process": proc, "class": cls, "pid": pid}
+    window = {"process": proc, "class": cls, "pid": pid}
+    if window_id and _kwin_capture_available():
+        window["window_id"] = "kwin:" + window_id.strip("{}")
+    return window
+
+
+def _kwin_capture_available() -> bool:
+    """Optional compatibility dependencies must not break game detection."""
+    try:
+        import importlib.util
+        import shutil
+        if not shutil.which("dbus-daemon"):
+            return False
+        if not all(importlib.util.find_spec(module) for module in ("dbus", "gi")):
+            return False
+        from .kwin_stream import is_available
+        return is_available()
+    except (ImportError, OSError, ValueError):
+        return False
 
 
 # ─── X11 ────────────────────────────────────────────────────────────────────
@@ -599,10 +627,21 @@ def get_focused_window_id() -> Optional[str]:
 
 
 def get_window_geometry(window_id: str) -> Optional[tuple[int, int]]:
-    """Pixel (width, height) of a specific window by id, same id space as
-    get_focused_window_id(), so this works even after focus has moved
-    elsewhere. Used to size gpu-screen-recorder's `-s` flag for a pinned
-    window_capture target."""
+    """Size/liveness of a pinned X11 id or `kwin:` UUID, independent of focus.
+
+    X11 capture uses this for GSR's `-s` flag; KWin's stream negotiates its
+    own size, but the daemon still needs the same window-liveness check.
+    """
+    if window_id and window_id.startswith("kwin:"):
+        uuid = window_id.removeprefix("kwin:")
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", uuid):
+            return None
+        raw = _run(["kdotool", "getwindowgeometry", "{" + uuid + "}"])
+        match = re.search(r"Geometry:\s*(\d+)x(\d+)", raw)
+        if not match:
+            return None
+        width, height = map(int, match.groups())
+        return (width, height) if width > 0 and height > 0 else None
     if _ADAPTER is not _get_active_window_x11 or not window_id:
         return None
     try:

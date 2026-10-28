@@ -160,6 +160,23 @@ OBS has a replay buffer. So why use Vice?
 
 Game detection (filename tagging and Discord presence) works on X11, Hyprland, sway and Niri. Works on KDE Plasma Wayland when `kdotool` is available. On other compositors clips simply save untagged.
 
+**Game Capture on KDE Plasma Wayland.** With a recognized game pinned, Vice
+captures its KWin window through PipeWire and keeps using GPU Screen Recorder
+for encoding, audio, replay clips and sessions, without following focus to
+another app. Runtime verification covers CachyOS (Arch-based), KDE Plasma
+Wayland, native GPU Screen Recorder, and both native Wayland and XWayland game
+windows. Other distributions, including NixOS, have not been runtime-tested.
+It requires the native `gpu-screen-recorder`, `kdotool`, `dbus-daemon`,
+libwayland-client, and Python's `dbus` and `gi` modules. On Arch/CachyOS, install
+`kdotool python-dbus python-gobject`; the remaining libraries normally come with
+the desktop. Other compositors keep their existing capture path.
+KWin must expose and authorize its window-screencast protocol; Vice does not
+disable compositor permission checks or change the desktop's portal service.
+
+Game detection, pin changes and fallback behavior are unchanged: before a game
+is detected or after its pinned window closes, Vice records the configured
+display. Closing a game does not automatically stop a session recording.
+
 ## CLI
 
 ```
@@ -182,7 +199,19 @@ The systemd user service created by the installer runs `vice start --no-open-ui`
 
 ## Configuration
 
-Vice writes `~/.config/vice/config.toml` on first run. Everything below is also editable live from the GUI.
+Vice writes `~/.config/vice/config.toml` on first run. Most settings below are also editable live from the GUI.
+
+Closing the native window with **X** or the in-app **Minimize** action releases
+the GUI and its webview by default; the background daemon keeps recording.
+The GUI's tray icon also disappears. Launch Vice again to open a new window
+connected to the running daemon. **Quit Vice** still stops the daemon completely.
+
+To keep the old hide-to-tray behavior, enable **Close to tray** under
+**Settings > Appearance** and save (or set `close_to_tray = true` in `[ui]`
+below). The next X / in-app Minimize uses the saved choice without reopening
+the GUI. This retains the webview and its memory while hidden; use the tray's
+**Open Vice** action or launch Vice again to restore it. Without a supported
+tray host, closing always releases the GUI instead.
 
 ```toml
 [recording]
@@ -191,6 +220,7 @@ clip_duration   = 20      # seconds saved per clip
 fps             = 60
 display         = "DP-1"  # optional; omit to use the backend default display
 follow_mouse_display = false # record whichever monitor the pointer is on, ignoring `display`
+window_capture  = false # pin capture to a recognized game window; otherwise use the display
 encoder         = "auto"  # auto | h264_nvenc | hevc_nvenc | h264_vaapi | hevc_vaapi | libx264 | libx265
 color_depth     = "8"     # 8 | 10 (10-bit needs an HEVC or AV1 encoder)
 backend         = "auto"  # auto | gsr | wf-recorder | ffmpeg
@@ -238,6 +268,9 @@ check_on_start = true   # ask GitHub once a day whether a newer release exists
 
 [notifications]
 sound_volume = 1.0   # clip and session tones, 0.0 to 1.0. 0 plays nothing
+
+[ui]
+close_to_tray = false # X / in-app Minimize release the GUI, not the recorder
 ```
 
 Notes:
