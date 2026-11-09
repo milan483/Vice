@@ -1,9 +1,7 @@
 """Static assertions over the web UI.
 
-The UI is a React and TypeScript source tree under ui-src/ that builds to two
-committed files, vice/ui/scripts/app.js and vice/ui/styles/app.css. These
-tests read the source rather than the bundle wherever they can, because the
-bundle is minified and a failure in it says nothing useful.
+The React UI and its prepaint entry build to committed assets in vice/ui/.
+These tests read the source wherever possible because the bundles are minified.
 
 What is worth asserting here is narrow. Behaviour is covered by driving the
 real app; these are the things that are invisible until a user on a particular
@@ -23,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_SRC = REPO_ROOT / "ui-src"
 UI_DIR = REPO_ROOT / "vice" / "ui"
 UI_INDEX = UI_DIR / "index.html"
+BUNDLE_BOOT = UI_DIR / "scripts" / "theme-boot.js"
 BUNDLE_JS = UI_DIR / "scripts" / "app.js"
 BUNDLE_CSS = UI_DIR / "styles" / "app.css"
 README = REPO_ROOT / "README.md"
@@ -155,11 +154,17 @@ class UISourcePresenceTests(unittest.TestCase):
                 f"first is {missing[0]!r}" if missing else "",
             )
 
-    def test_index_only_loads_the_two_built_assets(self) -> None:
+    def test_index_loads_only_the_bundled_assets(self) -> None:
         index = UI_INDEX.read_text()
         scripts = re.findall(r'<script[^>]*src="([^"]+)"', index)
         styles = re.findall(r'<link[^>]*href="([^"]+)"', index)
-        self.assertEqual(scripts, ["/scripts/app.js?v=__VICE_VERSION__"])
+        self.assertEqual(scripts, [
+            "/scripts/theme-boot.js?v=__VICE_VERSION__",
+            "/scripts/app.js?v=__VICE_VERSION__",
+        ])
+        self.assertIn('<script src="/scripts/theme-boot.js?v=__VICE_VERSION__"></script>', index)
+        self.assertLess(index.index(BUNDLE_BOOT.name), index.index('<div id="boot">'))
+        self.assertTrue(BUNDLE_BOOT.is_file())
         self.assertEqual(styles, ["/styles/app.css?v=__VICE_VERSION__"])
 
     def test_assets_carry_the_cache_busting_token(self) -> None:
@@ -167,7 +172,7 @@ class UISourcePresenceTests(unittest.TestCase):
         # then serves the assets immutable for a year. Without the token a
         # user keeps the previous build's UI after an upgrade.
         index = UI_INDEX.read_text()
-        self.assertEqual(index.count("?v=__VICE_VERSION__"), 2)
+        self.assertEqual(index.count("?v=__VICE_VERSION__"), 3)
 
 
 class PlatformWorkaroundTests(unittest.TestCase):
@@ -563,24 +568,15 @@ class DesignTokenTests(unittest.TestCase):
 
 
 class BootThemeTests(unittest.TestCase):
-    """The boot cover paints before the bundle, so it carries its own copy."""
+    """The cover and its palette load before the app bundle."""
 
-    def test_inline_colours_match_the_generated_accents(self) -> None:
-        index = UI_INDEX.read_text()
+    def test_the_boot_bundle_includes_all_generated_preset_colors(self) -> None:
+        bundle = BUNDLE_BOOT.read_text()
         accents = (UI_SRC / "theme" / "accents.ts").read_text()
-
-        generated_bg = dict(re.findall(r"(\w+): \{[^}]*?bg: '(#\w{6})'", accents, re.S))
-        generated_base = dict(re.findall(r"(\w+): \{\s*base: '(#\w{6})'", accents))
-        self.assertEqual(len(generated_bg), 5, "expected five accents")
-
-        for name, value in generated_bg.items():
-            self.assertIn(
-                f"{name}:'{value}'",
-                index,
-                f"index.html has a stale background for {name}; rerun npm run accents",
-            )
-        for name, value in generated_base.items():
-            self.assertIn(f"{name}:'{value}'", index, f"index.html has a stale accent for {name}")
+        colors = re.findall(r"^    (?:base|bg): '(#[0-9a-f]{6})',$", accents, re.M)
+        self.assertEqual(len(colors), 10, "expected a background and accent for each of five presets")
+        for value in colors:
+            self.assertIn(value, bundle, f"boot bundle is missing {value}; run npm run build")
 
     def test_the_boot_cover_can_set_the_wordmark_before_the_bundle(self) -> None:
         # The cover paints before the bundle parses. A linked font would flash a
@@ -698,9 +694,9 @@ class NoEmDashesAnywhereTests(unittest.TestCase):
         ".install",
         ".rules",
     }
-    # The two build outputs. Minified dependency strings are outside anyone's
+    # The build outputs. Minified dependency strings are outside anyone's
     # control here, and the sources they come from are scanned instead.
-    GENERATED = {BUNDLE_JS, BUNDLE_CSS}
+    GENERATED = {BUNDLE_JS, BUNDLE_CSS, BUNDLE_BOOT}
 
     def _shipped_files(self):
         ignored = _git_ignored()
@@ -868,14 +864,15 @@ class CustomAccentTests(unittest.TestCase):
         self.assertIn("rampFailures", self.derive)
 
     def test_the_boot_cover_keeps_the_legacy_migration_keys(self) -> None:
-        self.assertIn("vice-custom-bg", self.index)
-        self.assertIn("vice-custom-base", self.index)
+        startup = (UI_SRC / "theme" / "startup.ts").read_text()
+        self.assertIn("vice-theme", startup)
+        self.assertIn("vice-custom-accent", startup)
         self.assertIn('id="saved-theme"', self.index)
 
     def test_the_custom_theme_is_cached_by_seed(self) -> None:
         # <Theme> compares by identity, so rebuilding per render would swap the
         # theme object every frame and repaint the whole tree.
-        self.assertIn("cachedCustom", self.theme)
+        self.assertIn("customThemes.get(ramp)", self.theme)
 
 
 class AccentParityTests(unittest.TestCase):

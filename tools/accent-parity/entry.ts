@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {ACCENTS} from '../../ui-src/theme/accents';
 import {AMOLED, exactAccent} from '../../ui-src/theme/exactAccent';
 import {DEFAULT_PREFERENCES, legacyPreferences, parsePreferences} from '../../ui-src/theme/selection';
+import {resolveRamp} from '../../ui-src/theme/palette';
 import {contrastRatio, deriveAccent} from '../../ui-src/theme/deriveAccent';
 
 const SEEDS = {
@@ -73,5 +74,22 @@ assert.deepEqual(legacyPreferences('purple', '#808080'), {
   selection: {mode: 'preset', name: 'purple'}, seed: '#808080', manual: null,
 });
 assert.equal(legacyPreferences('custom', 'bad'), null);
+
+// Include a plausible old generated cache with the same seed. Prepaint
+// must use the actual derived palette even when the cache passes hex checks.
+const stale = {bg: '#11131a', base: '#8ab9f3', seed: saved.seed};
+const generated = {...saved, selection: {mode: 'generated'}};
+const manual = {...saved, selection: {mode: 'manual'}, manual: {bg: '#102030', base: '#ffffff'}};
+const startup = [generated, {...generated, boot: stale}, manual, {...manual, boot: stale}]
+  .map(preferences => {
+    const {bg, base} = resolveRamp(parsePreferences(preferences)!);
+    return {preferences, colors: [bg, base]};
+  });
+assert.deepEqual(resolveRamp(parsePreferences(generated)!), deriveAccent(saved.seed).ramp);
+out.__startup = startup;
+assert.deepEqual(startup[1].colors, startup[0].colors);
+assert.deepEqual(startup[3].colors, startup[2].colors);
+assert.deepEqual(startup[2].colors, ['#102030', '#ffffff']);
+assert.equal(resolveRamp(parsePreferences(generated)!), resolveRamp(parsePreferences(generated)!));
 
 console.log(JSON.stringify(out));

@@ -10,7 +10,7 @@ import {t} from '../lib/i18n';
 import {IconCheck, IconPlus} from './Icons';
 import {AccentPicker} from './AccentPicker';
 import {useAccentChoice} from '../lib/accentChoice';
-import {customAccent as deriveCustom} from '../theme/viceTheme';
+import {generatedRamp} from '../theme/palette';
 import {KeyCapture} from './settings/KeyCapture';
 import {Slider, Toggle} from './settings/Fields';
 import {ACCENTS, ACCENT_NAMES} from '../theme/accents';
@@ -130,7 +130,7 @@ export function Tutorial({open, onClose}: {open: boolean; onClose: () => void}) 
     target.current = 1;
     if (wrapRef.current) wrapRef.current.style.overflow = '';
   }, [open]);
-  const customBase = seed ? deriveCustom(seed).ramp.base : null;
+  const customBase = seed ? generatedRamp(seed).base : null;
   const duration = (state.config?.recording?.clip_duration as number | undefined) ?? 20;
   const buffer = (state.config?.recording?.buffer_duration as number | undefined) ?? 60;
   const clipDuration = (state.config?.recording?.clip_duration as number | undefined) ?? 20;

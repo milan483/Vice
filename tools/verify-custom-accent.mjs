@@ -82,8 +82,7 @@ try {
     }
   }
 
-  const html = readFileSync(join(repo, 'vice', 'ui', 'index.html'), 'utf8');
-  const bootScript = html.match(/<script>\n([\s\S]*?)<\/script>/)[1];
+  const bootScript = readFileSync(join(repo, 'vice', 'ui', 'scripts', 'theme-boot.js'), 'utf8');
   const bootColors = (saved, legacy = {}) => {
     const props = {};
     runInNewContext(bootScript, {
@@ -98,19 +97,16 @@ try {
   for (const [name, {bg, base}] of Object.entries(shipped)) {
     assert.deepEqual(bootColors({version: 1, selection: {mode: 'preset', name}}), [bg, base]);
   }
+  for (const {preferences, colors} of got.__startup) {
+    assert.deepEqual(bootColors(preferences), colors);
+  }
   const seed = '#808080';
   const {bg, base} = got.__probes[seed].ramp;
-  assert.deepEqual(bootColors({version: 1, selection: {mode: 'generated'}, seed,
-    boot: {bg, base, seed}}), [bg, base]);
   assert.deepEqual(bootColors(null, {'vice-theme': 'custom', 'vice-custom-accent': seed,
-    'vice-custom-bg': bg, 'vice-custom-base': base}), [bg, base]);
+    'vice-custom-bg': shipped.blue.bg, 'vice-custom-base': shipped.blue.base}), [bg, base]);
   assert.deepEqual(bootColors({version: 1, selection: {mode: 'amoled'}}), ['#000000', '#ffffff']);
-  const manual = {bg: '#000000', base: '#ffffff'};
-  assert.deepEqual(bootColors({version: 1, selection: {mode: 'manual'}, manual, boot: manual}),
-    ['#000000', '#ffffff']);
-  const invalid = {...manual, base: '#000000'};
-  assert.deepEqual(bootColors({version: 1, selection: {mode: 'manual'}, manual: invalid,
-    boot: invalid}), [shipped.blue.bg, shipped.blue.base]);
+  assert.deepEqual(bootColors({version: 1, selection: {mode: 'manual'},
+    manual: {bg: '#000000', base: '#000000'}}), [shipped.blue.bg, shipped.blue.base]);
   console.log('Exact palette, preference migration and boot checks passed.');
 
   if (problems) {

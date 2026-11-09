@@ -33,7 +33,7 @@ import {IconCheck, IconClose, IconPlus} from '../components/Icons';
 import {AccentPicker} from '../components/AccentPicker';
 import {ExactAccentPicker} from '../components/ExactAccentPicker';
 import {useAccentChoice} from '../lib/accentChoice';
-import {customAccent as deriveCustom} from '../theme/viceTheme';
+import {generatedRamp} from '../theme/palette';
 import {AudioTracks, type AudioSource} from '../components/settings/AudioTracks';
 import {KeyCapture} from '../components/settings/KeyCapture';
 import {
@@ -74,7 +74,7 @@ export function Settings() {
   const [editingExact, setEditingExact] = useState(false);
   const accent = selection.mode === 'preset' ? selection.name : null;
   const generated = selection.mode === 'generated';
-  const customBase = seed ? deriveCustom(seed).ramp.base : null;
+  const customBase = seed ? generatedRamp(seed).base : null;
   const {config, status} = state;
 
   const [draft, setDraft] = useState<Draft | null>(null);

@@ -2,9 +2,7 @@ import {defineTheme} from '@astryxdesign/core/theme';
 
 import {neutralTheme} from '../../src/themes/neutral/neutralTheme';
 import {ACCENTS, type AccentName, type AccentRamp} from './accents';
-import {deriveAccent} from './deriveAccent';
-
-import {AMOLED, exactAccent} from './exactAccent';
+import {resolveRamp} from './palette';
 import type {ThemePreferences} from './selection';
 
 // Chunky geometry, in the manner of Android's expressive quick settings: a
@@ -150,47 +148,21 @@ export const VICE_THEMES = {
   orange: accentTheme('orange', ACCENTS.orange),
 } satisfies Record<AccentName, ReturnType<typeof accentTheme>>;
 
-/**
- * A custom accent's ramp and theme, derived on demand and kept.
- *
- * Cached by seed because <Theme> compares by identity: rebuilding on every
- * render would swap the theme object every frame and repaint the whole tree.
- */
-let cachedCustom: {seed: string; ramp: AccentRamp; theme: ReturnType<typeof accentTheme>; failures: string[]} | null = null;
+// <Theme> compares by identity, so keep one theme per resolved custom ramp.
+const customThemes = new WeakMap<AccentRamp, ReturnType<typeof accentTheme>>();
 
-export function customAccent(seed: string): {
-  ramp: AccentRamp;
-  theme: ReturnType<typeof accentTheme>;
-  failures: string[];
-} {
-  if (cachedCustom?.seed === seed) {
-    return cachedCustom;
-  }
-  const {ramp, failures} = deriveAccent(seed);
-  const theme = accentTheme('custom', ramp);
-  cachedCustom = {seed, ramp, theme, failures};
-  return {ramp, theme, failures};
-}
-
-const amoledRamp = exactAccent(AMOLED).ramp!;
-const amoledTheme = accentTheme('amoled', amoledRamp);
-let cachedManual: {base: string; bg: string; ramp: AccentRamp; theme: ReturnType<typeof accentTheme>} | null = null;
-
-/** Resolve the active selection for the app and its other renderers. */
-export function resolveAccent({selection, seed, manual}: ThemePreferences): {
+export function resolveAccent(preferences: ThemePreferences): {
   ramp: AccentRamp;
   theme: ReturnType<typeof accentTheme>;
 } {
-  if (selection.mode === 'generated' && seed) return customAccent(seed);
-  if (selection.mode === 'amoled') return {ramp: amoledRamp, theme: amoledTheme};
-  if (selection.mode === 'manual' && manual) {
-    if (cachedManual?.base === manual.base && cachedManual.bg === manual.bg) return cachedManual;
-    const {ramp} = exactAccent(manual);
-    if (ramp) {
-      cachedManual = {...manual, ramp, theme: accentTheme('manual', ramp)};
-      return cachedManual;
-    }
+  const ramp = resolveRamp(preferences);
+  const {selection} = preferences;
+  if (selection.mode === 'preset') return {ramp, theme: VICE_THEMES[selection.name]};
+
+  let theme = customThemes.get(ramp);
+  if (!theme) {
+    theme = accentTheme(selection.mode === 'generated' ? 'custom' : selection.mode, ramp);
+    customThemes.set(ramp, theme);
   }
-  const name = selection.mode === 'preset' ? selection.name : 'blue';
-  return {ramp: ACCENTS[name], theme: VICE_THEMES[name]};
+  return {ramp, theme};
 }

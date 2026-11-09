@@ -10,7 +10,7 @@
 // surface role instead of a container one. That is the whole reason the buttons
 // looked unfinished.
 
-import {readFileSync, writeFileSync} from 'node:fs';
+import {writeFileSync} from 'node:fs';
 
 // material-color-utilities 0.4.0 exports only its barrel, and the barrel pulls
 // in scheme/*.js, which use extensionless relative imports that Node's ESM
@@ -128,9 +128,6 @@ const rows = Object.entries(SOURCE).map(([name, source]) => {
   return {
     name,
     source,
-    // base and bg keep these names because two other files depend on them:
-    // BootThemeTests regexes them out of accents.ts, and index.html carries its
-    // own copy for the pre-paint cover.
     base: palette('primaryPalette', tone),
     onBase: g(M.onPrimary),
     // M3 expresses hover and press as state layers over the fill. Vice paints
@@ -309,25 +306,4 @@ export const ACCENT_NAMES = Object.keys(ACCENTS) as AccentName[];
 `,
 );
 
-// The boot cover paints before the bundle parses, so index.html carries its own
-// copy of the background and accent for all five. Writing it from here means it
-// cannot drift; BootThemeTests still fails the build if somebody hand-edits it.
-const indexPath = new URL('../vice/ui/index.html', import.meta.url);
-const map = (key) =>
-  '{' + rows.map(r => `${r.name}:'${r[key]}'`).join(',') + '}';
-
-let index = readFileSync(indexPath, 'utf8');
-for (const [name, key] of [['BG', 'bg'], ['AC', 'base']]) {
-  const pattern = new RegExp(`var ${name} = \\{[^}]*\\};`);
-  // Test before replacing: an unchanged run writes identical bytes, so
-  // comparing the result to the original cannot tell "already correct" from
-  // "pattern missing".
-  if (!pattern.test(index)) {
-    console.error(`Could not find the ${name} map in vice/ui/index.html.`);
-    process.exit(1);
-  }
-  index = index.replace(pattern, `var ${name} = ${map(key)};`);
-}
-writeFileSync(indexPath, index);
-
-console.log(`\nWrote ui-src/theme/accents.ts, vice/data/accents.json and the boot map in vice/ui/index.html (strategy: ${STRATEGY})`);
+console.log(`\nWrote ui-src/theme/accents.ts and vice/data/accents.json (strategy: ${STRATEGY}). Run npm run build to refresh the boot and app bundles.`);

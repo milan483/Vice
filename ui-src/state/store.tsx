@@ -14,9 +14,10 @@ import {api} from '../lib/api';
 import {connectWs} from '../lib/ws';
 import {formatDuration, hotkeyLabel} from '../lib/format';
 import {H264_SUPPORTED} from '../lib/env';
-import {loadThemePreference, persistThemePreference} from '../lib/themePreference';
+import {persistThemePreference} from '../lib/themePreference';
+import {loadThemePreference} from '../theme/startup';
 import {DEFAULT_PREFERENCES, type ThemePreferences} from '../theme/selection';
-import {resolveAccent} from '../theme/viceTheme';
+import {resolveRamp} from '../theme/palette';
 import {clipTitle, imageSlug, imageTitle, type KeyOverlayState} from '../lib/types';
 import type {
   Clip,
@@ -506,7 +507,7 @@ export function StoreProvider({children}: {children: ReactNode}) {
         dispatch({type: 'loaded', config, clips, images, playlists, status});
         // Retry a share-color sync interrupted after the theme was stored.
         if (bootTheme.source === 'saved' && themePreference.current === bootTheme.preferences
-            && config.sharing.embed_color !== resolveAccent(bootTheme.preferences).ramp.base) {
+            && config.sharing.embed_color !== resolveRamp(bootTheme.preferences).base) {
           selectTheme(previous => previous);
         }
       } catch (err) {
