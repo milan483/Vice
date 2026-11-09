@@ -136,7 +136,7 @@ export function AccentPicker({
   const field = typed ?? seed.toUpperCase();
 
   return (
-    <Modal open={open} title={t('accents.customTitle')} onClose={onCancel} footer={
+    <Modal open={open} title={t('accents.generatedTitle')} onClose={onCancel} footer={
       <>
         <button type="button" className="btn btn-quiet" onClick={onCancel}>
           {t('common.cancel')}
@@ -213,7 +213,7 @@ export function AccentPicker({
  * picked, because M3 puts primary at tone 80 on a dark scheme. Without this
  * the confirm button looks like it ignored the choice.
  */
-function SchemePreview({ramp}: {ramp: AccentRamp}) {
+export function SchemePreview({ramp}: {ramp: AccentRamp}) {
   return (
     <div className="ap-preview" style={{background: ramp.bg}}>
       <div className="ap-preview-card" style={{background: ramp.surfaceLow}}>

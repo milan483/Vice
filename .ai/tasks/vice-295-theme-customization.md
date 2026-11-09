@@ -1,4 +1,4 @@
-# Vice #295: better theme customization — implementation specification
+# Vice #295: better theme customization: implementation specification
 
 Source: https://github.com/splitshotz/Vice/issues/295 (open; request for precise colors including pure black/white and optional Matugen colors)
 Branch baseline: `splitshotz/Vice` main at `ad7758bf55e48b53db0b7e2dce11bedb465b90a3`.
@@ -13,7 +13,7 @@ This branch intentionally excludes three unrelated fork-only commits on `milan48
 - `vice/share.py` already provides `/api/app-state` at `~/.local/share/vice/ui_state.json`, useful if native-webview persistence is unreliable.
 - Theme parity/static tests exist in `tests/test_ui_static.py` and `tools/verify-custom-accent.mjs`.
 
-## PR 1 — Exact manual themes and monochrome (implement on this branch)
+## PR 1: Exact manual themes and monochrome (implement on this branch)
 
 ### Product behavior
 1. In Settings → Appearance keep all five presets and the **existing** generated custom accent unchanged.
@@ -42,7 +42,7 @@ This branch intentionally excludes three unrelated fork-only commits on `milan48
 - [ ] `npm run typecheck`, `npm run build`, `npm run accents:verify`, `npm run i18n:check`, `python -m unittest discover -s tests` pass or baseline differences are documented.
 - [ ] Test on real KDE Plasma Wayland; post screenshots and a detailed implementation/test report **on the draft PR**. Never claim hardware testing without performing it.
 
-## PR 2 — Optional Matugen palette following (separate branch/PR after PR 1)
+## PR 2: Optional Matugen palette following (separate branch/PR after PR 1)
 
 External research:
 - Matugen documentation: https://github.com/InioX/matugen and https://github.com/InioX/matugen/wiki/Configuration

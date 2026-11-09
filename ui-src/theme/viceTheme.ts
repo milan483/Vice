@@ -4,15 +4,8 @@ import {neutralTheme} from '../../src/themes/neutral/neutralTheme';
 import {ACCENTS, type AccentName, type AccentRamp} from './accents';
 import {deriveAccent} from './deriveAccent';
 
-/**
- * The five shipped swatches, or a colour the user picked.
- *
- * 'custom' is not in AccentName because accents.ts is generated and the
- * generator has no business knowing about it.
- */
-export type AccentChoice = AccentName | 'custom';
-
-export const CUSTOM_ACCENT: AccentChoice = 'custom';
+import {AMOLED, exactAccent} from './exactAccent';
+import type {ThemePreferences} from './selection';
 
 // Chunky geometry, in the manner of Android's expressive quick settings: a
 // control is an object you could pick up, not a rectangle with the corners
@@ -163,8 +156,7 @@ export const VICE_THEMES = {
  * Cached by seed because <Theme> compares by identity: rebuilding on every
  * render would swap the theme object every frame and repaint the whole tree.
  */
-let cachedCustom: {seed: string; ramp: AccentRamp; theme: ReturnType<typeof accentTheme>} | null =
-  null;
+let cachedCustom: {seed: string; ramp: AccentRamp; theme: ReturnType<typeof accentTheme>; failures: string[]} | null = null;
 
 export function customAccent(seed: string): {
   ramp: AccentRamp;
@@ -172,25 +164,33 @@ export function customAccent(seed: string): {
   failures: string[];
 } {
   if (cachedCustom?.seed === seed) {
-    return {ramp: cachedCustom.ramp, theme: cachedCustom.theme, failures: []};
+    return cachedCustom;
   }
   const {ramp, failures} = deriveAccent(seed);
   const theme = accentTheme('custom', ramp);
-  cachedCustom = {seed, ramp, theme};
+  cachedCustom = {seed, ramp, theme, failures};
   return {ramp, theme, failures};
 }
 
-/** The ramp and theme for whatever the user has chosen. */
-export function resolveAccent(
-  accent: AccentChoice,
-  seed: string | null,
-): {ramp: AccentRamp; theme: ReturnType<typeof accentTheme>} {
-  if (accent === 'custom' && seed) {
-    const {ramp, theme} = customAccent(seed);
-    return {ramp, theme};
+const amoledRamp = exactAccent(AMOLED).ramp!;
+const amoledTheme = accentTheme('amoled', amoledRamp);
+let cachedManual: {base: string; bg: string; ramp: AccentRamp; theme: ReturnType<typeof accentTheme>} | null = null;
+
+/** Resolve the active selection for the app and its other renderers. */
+export function resolveAccent({selection, seed, manual}: ThemePreferences): {
+  ramp: AccentRamp;
+  theme: ReturnType<typeof accentTheme>;
+} {
+  if (selection.mode === 'generated' && seed) return customAccent(seed);
+  if (selection.mode === 'amoled') return {ramp: amoledRamp, theme: amoledTheme};
+  if (selection.mode === 'manual' && manual) {
+    if (cachedManual?.base === manual.base && cachedManual.bg === manual.bg) return cachedManual;
+    const {ramp} = exactAccent(manual);
+    if (ramp) {
+      cachedManual = {...manual, ramp, theme: accentTheme('manual', ramp)};
+      return cachedManual;
+    }
   }
-  // A custom accent with no seed saved falls back rather than rendering
-  // nothing, which is what a cleared localStorage looks like.
-  const name = (accent === 'custom' ? 'blue' : accent) as AccentName;
+  const name = selection.mode === 'preset' ? selection.name : 'blue';
   return {ramp: ACCENTS[name], theme: VICE_THEMES[name]};
 }

@@ -270,7 +270,16 @@ def _load_app_state() -> dict:
 
 def _save_app_state(state: dict) -> None:
     APP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    APP_STATE_PATH.write_text(json.dumps(state))
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=APP_STATE_PATH.parent, delete=False, encoding="utf-8"
+    ) as fh:
+        tmp = Path(fh.name)
+        try:
+            json.dump(state, fh)
+            fh.close()
+            tmp.replace(APP_STATE_PATH)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def _thumb_path(path: Path) -> Path:
@@ -1609,6 +1618,14 @@ class ShareServer:
             # stays the plain version.
             content = content.replace(f"?v={UI_VERSION_TOKEN}", f"?v={_ui_asset_rev()}")
             content = content.replace(UI_VERSION_TOKEN, __version__)
+            # Only this preference goes into the boot document. Escape '<'
+            # because a closing tag would terminate a script even inside JSON.
+            try:
+                theme = json.dumps(_load_app_state().get("theme"), allow_nan=False)
+            except ValueError:
+                theme = "null"
+            theme = theme.replace("<", "\\u003c")
+            content = content.replace('id="saved-theme">null<', f'id="saved-theme">{theme}<', 1)
             return web.Response(
                 text=content,
                 content_type="text/html",

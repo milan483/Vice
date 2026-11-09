@@ -31,6 +31,7 @@ import {useStore} from '../state/store';
 import {Modal} from '../components/Modal';
 import {IconCheck, IconClose, IconPlus} from '../components/Icons';
 import {AccentPicker} from '../components/AccentPicker';
+import {ExactAccentPicker} from '../components/ExactAccentPicker';
 import {useAccentChoice} from '../lib/accentChoice';
 import {customAccent as deriveCustom} from '../theme/viceTheme';
 import {AudioTracks, type AudioSource} from '../components/settings/AudioTracks';
@@ -68,10 +69,13 @@ interface DisplayInfo {
 
 export function Settings() {
   const {state, saveConfig, notify} = useStore();
-  const {choose, chooseCustom, seed} = useAccentChoice();
+  const {selection, choose, chooseCustom, seed, manual, chooseManual, chooseAmoled} = useAccentChoice();
   const [picking, setPicking] = useState(false);
+  const [editingExact, setEditingExact] = useState(false);
+  const accent = selection.mode === 'preset' ? selection.name : null;
+  const generated = selection.mode === 'generated';
   const customBase = seed ? deriveCustom(seed).ramp.base : null;
-  const {config, accent, status} = state;
+  const {config, status} = state;
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [baseline, setBaseline] = useState<string>('');
@@ -1161,21 +1165,37 @@ export function Settings() {
                   {accent === name ? <IconCheck size={13} /> : null}
                 </button>
               ))}
-              <button
-                type="button"
-                className="swatch swatch-custom"
-                data-active={accent === 'custom' || undefined}
-                // The seed's own derived accent once one is saved, so the
-                // swatch shows the colour it would apply rather than a
-                // permanent rainbow that says nothing about the choice.
-                style={customBase ? {background: customBase} : undefined}
-                title={t('accents.customTitle')}
-                aria-label={t('accents.customTitle')}
-                aria-pressed={accent === 'custom'}
-                onClick={() => setPicking(true)}>
-                {accent === 'custom' ? <IconCheck size={13} /> : <IconPlus size={13} />}
-              </button>
             </div>
+          </Row>
+
+          <Row label={t('accents.generatedTitle')} help={t('accents.customBody')}>
+            <button
+              type="button"
+              className="swatch swatch-custom"
+              data-active={generated || undefined}
+              style={customBase ? {background: customBase} : undefined}
+              aria-label={t('accents.generatedTitle')}
+              aria-pressed={generated}
+              onClick={() => setPicking(true)}>
+              {generated ? <IconCheck size={13} /> : <IconPlus size={13} />}
+            </button>
+          </Row>
+
+          <Row label={t('accents.manualTitle')} help={t('accents.manualBody')}>
+            <button type="button" className="btn btn-quiet" onClick={() => setEditingExact(true)}>
+              {t(selection.mode === 'manual' ? 'accents.editActive' : 'accents.editExact')}
+            </button>
+          </Row>
+
+          <Row label={t('accents.amoledTitle')} help={t('accents.amoledBody')}>
+            <button
+              type="button"
+              className="btn btn-quiet amoled-choice"
+              aria-pressed={selection.mode === 'amoled'}
+              onClick={chooseAmoled}>
+              {selection.mode === 'amoled' ? <IconCheck size={13} /> : null}
+              {t('accents.amoledTitle')}
+            </button>
           </Row>
 
           <Row
@@ -1308,6 +1328,16 @@ export function Settings() {
         <p>{t('settings.restartBody')}</p>
       </Modal>
 
+      {editingExact ? (
+        <ExactAccentPicker
+          initial={manual}
+          onCancel={() => setEditingExact(false)}
+          onConfirm={colors => {
+            chooseManual(colors);
+            setEditingExact(false);
+          }}
+        />
+      ) : null}
       <AccentPicker
         open={picking}
         initial={seed}

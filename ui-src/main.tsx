@@ -1,4 +1,4 @@
-import {StrictMode, useEffect, useState} from 'react';
+import {StrictMode, useEffect, useLayoutEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Theme} from '@astryxdesign/core/theme';
 
@@ -33,10 +33,10 @@ function syncNativeTrayLabels(): void {
 
 function App() {
   const {state} = useStore();
-  const {accent, customAccent, ready, view} = state;
+  const {themePreferences, ready, view} = state;
   // One resolve per render, shared by the theme, the ambient wash and the
   // custom properties, so a custom accent cannot be derived three times.
-  const {ramp, theme} = resolveAccent(accent, customAccent);
+  const {ramp, theme} = resolveAccent(themePreferences);
   const [, retranslate] = useState(0);
 
   useEffect(() => {
@@ -63,8 +63,9 @@ function App() {
 
   // On the root, not on .vice-app: body and the boot cover both sit outside
   // that element and would otherwise never see the themed background.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement;
+    root.style.setProperty('--boot-accent', ramp.base);
     const vars = accentVars(ramp);
     for (const [key, value] of Object.entries(vars)) root.style.setProperty(key, value);
   }, [ramp]);

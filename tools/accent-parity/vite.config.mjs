@@ -8,6 +8,7 @@ export default defineConfig({
     lib: {entry: new URL('./entry.ts', import.meta.url).pathname, formats: ['es'], fileName: 'parity'},
     outDir: process.env.VICE_PARITY_OUT ?? new URL('./out', import.meta.url).pathname,
     minify: false,
+    rollupOptions: {external: ['node:assert/strict']},
     emptyOutDir: false,
     target: 'node20',
   },

@@ -867,21 +867,10 @@ class CustomAccentTests(unittest.TestCase):
         self.assertIn("is pure black", self.derive)
         self.assertIn("rampFailures", self.derive)
 
-    def test_the_boot_cover_can_paint_a_custom_accent(self) -> None:
-        # The cover paints before the bundle parses and cannot derive anything,
-        # so the two colours it needs are cached when the user confirms.
+    def test_the_boot_cover_keeps_the_legacy_migration_keys(self) -> None:
         self.assertIn("vice-custom-bg", self.index)
         self.assertIn("vice-custom-base", self.index)
-        choice = (UI_SRC / "lib" / "accentChoice.ts").read_text()
-        self.assertIn("vice-custom-bg", choice)
-        self.assertIn("vice-custom-base", choice)
-        # And it still falls back when they are missing or corrupt.
-        self.assertIn("if (!bg)", self.index)
-
-    def test_a_custom_accent_without_a_seed_falls_back(self) -> None:
-        # A cleared localStorage leaves 'custom' selected with nothing behind
-        # it, and a window painted in no accent at all is not an option.
-        self.assertIn("accent === 'custom' ? 'blue' : accent", self.theme)
+        self.assertIn('id="saved-theme"', self.index)
 
     def test_the_custom_theme_is_cached_by_seed(self) -> None:
         # <Theme> compares by identity, so rebuilding per render would swap the

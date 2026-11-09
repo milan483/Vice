@@ -6,6 +6,7 @@ import {
   useMemo,
   useReducer,
   useRef,
+  useState,
   type ReactNode,
 } from 'react';
 
@@ -13,8 +14,9 @@ import {api} from '../lib/api';
 import {connectWs} from '../lib/ws';
 import {formatDuration, hotkeyLabel} from '../lib/format';
 import {H264_SUPPORTED} from '../lib/env';
-import {ACCENT_NAMES, DEFAULT_ACCENT} from '../theme/accents';
-import type {AccentChoice} from '../theme/viceTheme';
+import {loadThemePreference, persistThemePreference} from '../lib/themePreference';
+import {DEFAULT_PREFERENCES, type ThemePreferences} from '../theme/selection';
+import {resolveAccent} from '../theme/viceTheme';
 import {clipTitle, imageSlug, imageTitle, type KeyOverlayState} from '../lib/types';
 import type {
   Clip,
@@ -47,8 +49,6 @@ export interface IslandEvent {
   holdMs: number;
 }
 
-export const CUSTOM_ACCENT_KEY = 'vice-custom-accent';
-
 export type BannerId = 'recorder' | 'cpu' | 'codec-gpu' | 'codec-h264';
 
 interface State {
@@ -66,9 +66,7 @@ interface State {
   view: ViewName;
   currentPlaylistId: string | null;
   searchQuery: string;
-  accent: AccentChoice;
-  /** The seed for a custom accent, as #rrggbb. Null when none is saved. */
-  customAccent: string | null;
+  themePreferences: ThemePreferences;
   event: IslandEvent | null;
   sessionStartedAt: number | null;
   dismissed: BannerId[];
@@ -109,8 +107,7 @@ const initialState: State = {
   view: 'home',
   currentPlaylistId: null,
   searchQuery: '',
-  accent: DEFAULT_ACCENT,
-  customAccent: null,
+  themePreferences: DEFAULT_PREFERENCES,
   event: null,
   sessionStartedAt: null,
   dismissed: [],
@@ -131,7 +128,7 @@ type Action =
   | {type: 'ws'; msg: WsMessage}
   | {type: 'setView'; view: ViewName; playlistId?: string | null}
   | {type: 'setSearch'; query: string}
-  | {type: 'setAccent'; accent: AccentChoice; custom?: string | null}
+  | {type: 'setTheme'; preferences: ThemePreferences}
   | {type: 'setConfig'; config: Config}
   | {type: 'mergeConfig'; patch: Record<string, Record<string, unknown>>}
   | {type: 'setClips'; clips: Clip[]}
@@ -182,15 +179,8 @@ function reduce(state: State, action: Action): State {
     case 'setSearch':
       return {...state, searchQuery: action.query};
 
-    case 'setAccent':
-      return {
-        ...state,
-        accent: action.accent,
-        // A new seed only arrives with a custom pick; switching back to a
-        // named swatch keeps the last custom colour so returning to it does
-        // not mean picking it again.
-        customAccent: action.custom !== undefined ? action.custom : state.customAccent,
-      };
+    case 'setTheme':
+      return {...state, themePreferences: action.preferences};
 
     case 'setConfig':
       return {...state, config: action.config};
@@ -458,6 +448,7 @@ interface Store {
   refreshClips: () => Promise<void>;
   refreshImages: () => Promise<void>;
   refreshPlaylists: () => Promise<void>;
+  selectTheme: (update: (previous: ThemePreferences) => ThemePreferences) => void;
   notify: (event: Omit<IslandEvent, 'id'>) => void;
   saveConfig: (
     patch: Record<string, Record<string, unknown>>,
@@ -467,7 +458,37 @@ interface Store {
 const StoreContext = createContext<Store | null>(null);
 
 export function StoreProvider({children}: {children: ReactNode}) {
-  const [state, dispatch] = useReducer(reduce, initialState);
+  const [bootTheme] = useState(loadThemePreference);
+  const [state, dispatch] = useReducer(reduce, bootTheme.preferences, preferences => ({
+    ...initialState,
+    themePreferences: preferences,
+  }));
+  const themePreference = useRef(bootTheme.preferences);
+  const themeWrites = useRef(Promise.resolve());
+
+  const selectTheme = useCallback((update: (previous: ThemePreferences) => ThemePreferences) => {
+    const preferences = update(themePreference.current);
+    themePreference.current = preferences;
+    dispatch({type: 'setTheme', preferences});
+    // Settings and the tutorial share this queue. A slow write must not
+    // replace a more recent selection or put an old accent on a share embed.
+    themeWrites.current = themeWrites.current
+      .then(() => persistThemePreference(preferences))
+      .catch(err => {
+        console.debug('Saving the theme failed', err);
+        dispatch({
+          type: 'event',
+          event: {kind: 'error', tone: 'error', title: t('accents.saveFailed'), holdMs: 6000},
+        });
+      });
+  }, []);
+
+  const needsMigration = useRef(bootTheme.source === 'legacy');
+  useEffect(() => {
+    if (!needsMigration.current) return;
+    needsMigration.current = false;
+    selectTheme(previous => previous);
+  }, [selectTheme]);
 
   // First load. Everything the shell needs before it can show a screen.
   useEffect(() => {
@@ -481,7 +502,13 @@ export function StoreProvider({children}: {children: ReactNode}) {
           api.playlists(),
           api.status(),
         ]);
-        if (!cancelled) dispatch({type: 'loaded', config, clips, images, playlists, status});
+        if (cancelled) return;
+        dispatch({type: 'loaded', config, clips, images, playlists, status});
+        // Retry a share-color sync interrupted after the theme was stored.
+        if (bootTheme.source === 'saved' && themePreference.current === bootTheme.preferences
+            && config.sharing.embed_color !== resolveAccent(bootTheme.preferences).ramp.base) {
+          selectTheme(previous => previous);
+        }
       } catch (err) {
         if (!cancelled) dispatch({type: 'loadFailed', error: (err as Error).message});
       }
@@ -489,27 +516,7 @@ export function StoreProvider({children}: {children: ReactNode}) {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  // The accent is a per-install preference, not a synced setting.
-  useEffect(() => {
-    let custom: string | null = null;
-    try {
-      const raw = localStorage.getItem(CUSTOM_ACCENT_KEY);
-      custom = raw && /^#[0-9a-f]{6}$/i.test(raw) ? raw.toLowerCase() : null;
-    } catch (err) {
-      console.debug('Reading the custom accent failed', err);
-    }
-    const saved = localStorage.getItem('vice-theme');
-    const named = saved && (ACCENT_NAMES as string[]).includes(saved);
-    // A saved 'custom' with no seed behind it is not a usable accent, so it
-    // falls back rather than opening the window in a half-applied theme.
-    if (named || (saved === 'custom' && custom)) {
-      dispatch({type: 'setAccent', accent: saved as AccentChoice, custom});
-    } else if (custom) {
-      dispatch({type: 'setAccent', accent: DEFAULT_ACCENT, custom});
-    }
-  }, []);
+  }, [bootTheme, selectTheme]);
 
   // Bumped by every picture event, so a list fetched before one can tell it is
   // out of date. Listing probes every file and takes about a second on a real
@@ -643,6 +650,7 @@ export function StoreProvider({children}: {children: ReactNode}) {
       refreshImages,
       refreshPlaylists,
       notify,
+      selectTheme,
       saveConfig,
     }),
     [
@@ -654,6 +662,7 @@ export function StoreProvider({children}: {children: ReactNode}) {
       refreshImages,
       refreshPlaylists,
       notify,
+      selectTheme,
       saveConfig,
     ],
   );

@@ -41,7 +41,7 @@ const PAGES = [
  */
 export function Tutorial({open, onClose}: {open: boolean; onClose: () => void}) {
   const {state, hotkey, notify, saveConfig} = useStore();
-  const {choose, chooseCustom, seed} = useAccentChoice();
+  const {selection, choose, chooseCustom, seed} = useAccentChoice();
   const [page, setPage] = useState(1);
   const [picking, setPicking] = useState(false);
 
@@ -136,7 +136,8 @@ export function Tutorial({open, onClose}: {open: boolean; onClose: () => void}) 
   const clipDuration = (state.config?.recording?.clip_duration as number | undefined) ?? 20;
   const clipKey = (state.config?.hotkeys?.clip as string | undefined) ?? '';
   const shotKey = (state.config?.hotkeys?.screenshot as string | undefined) ?? '';
-  const accent = state.accent;
+  const accent = selection.mode === 'preset' ? selection.name : null;
+  const generated = selection.mode === 'generated';
   // Both default off, which is how Vice behaved before either existed. Asking
   // here is the only place a new user meets them before they matter.
   const gameCapture = Boolean(state.config?.recording?.window_capture);
@@ -227,13 +228,13 @@ export function Tutorial({open, onClose}: {open: boolean; onClose: () => void}) 
               <button
                 type="button"
                 className="swatch swatch-lg swatch-custom"
-                data-active={accent === 'custom' || undefined}
+                data-active={generated || undefined}
                 style={customBase ? {background: customBase} : undefined}
-                title={t('accents.customTitle')}
-                aria-label={t('accents.customTitle')}
-                aria-pressed={accent === 'custom'}
+                title={t('accents.generatedTitle')}
+                aria-label={t('accents.generatedTitle')}
+                aria-pressed={generated}
                 onClick={() => setPicking(true)}>
-                {accent === 'custom' ? <IconCheck size={16} /> : <IconPlus size={16} />}
+                {generated ? <IconCheck size={16} /> : <IconPlus size={16} />}
               </button>
             </div>
           </>

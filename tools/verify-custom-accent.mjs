@@ -22,6 +22,8 @@ import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import assert from 'node:assert/strict';
+import {runInNewContext} from 'node:vm';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const repo = fileURLToPath(new URL('..', import.meta.url));
@@ -79,6 +81,37 @@ try {
       console.log(`  ok  ${seed} -> accent ${ramp.base}, background ${ramp.bg}`);
     }
   }
+
+  const html = readFileSync(join(repo, 'vice', 'ui', 'index.html'), 'utf8');
+  const bootScript = html.match(/<script>\n([\s\S]*?)<\/script>/)[1];
+  const bootColors = (saved, legacy = {}) => {
+    const props = {};
+    runInNewContext(bootScript, {
+      document: {
+        getElementById: () => ({textContent: JSON.stringify(saved)}),
+        documentElement: {style: {setProperty: (key, value) => { props[key] = value; }}},
+      },
+      localStorage: {getItem: key => legacy[key]},
+    });
+    return [props['--vice-bg'], props['--boot-accent']];
+  };
+  for (const [name, {bg, base}] of Object.entries(shipped)) {
+    assert.deepEqual(bootColors({version: 1, selection: {mode: 'preset', name}}), [bg, base]);
+  }
+  const seed = '#808080';
+  const {bg, base} = got.__probes[seed].ramp;
+  assert.deepEqual(bootColors({version: 1, selection: {mode: 'generated'}, seed,
+    boot: {bg, base, seed}}), [bg, base]);
+  assert.deepEqual(bootColors(null, {'vice-theme': 'custom', 'vice-custom-accent': seed,
+    'vice-custom-bg': bg, 'vice-custom-base': base}), [bg, base]);
+  assert.deepEqual(bootColors({version: 1, selection: {mode: 'amoled'}}), ['#000000', '#ffffff']);
+  const manual = {bg: '#000000', base: '#ffffff'};
+  assert.deepEqual(bootColors({version: 1, selection: {mode: 'manual'}, manual, boot: manual}),
+    ['#000000', '#ffffff']);
+  const invalid = {...manual, base: '#000000'};
+  assert.deepEqual(bootColors({version: 1, selection: {mode: 'manual'}, manual: invalid,
+    boot: invalid}), [shipped.blue.bg, shipped.blue.base]);
+  console.log('Exact palette, preference migration and boot checks passed.');
 
   if (problems) {
     console.error(

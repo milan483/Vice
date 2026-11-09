@@ -1571,6 +1571,27 @@ class ShareServerUiVersionTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(response.text, r"/scripts/settings\.js\?v=[\w.\-]+")
         self.assertEqual(response.headers.get("Cache-Control"), "no-store")
 
+    async def test_boot_receives_only_escaped_theme_state(self) -> None:
+        import vice.share as share_mod
+
+        theme = {"version": 1, "seed": "</script><script>alert(1)</script>"}
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "ui_state.json"
+            with mock.patch.object(share_mod, "APP_STATE_PATH", state_path):
+                server = ShareServer(Config())
+                req = mock.Mock()
+                req.json = mock.AsyncMock(return_value={"theme": theme, "other": "private flag"})
+                self.assertEqual((await server._api_set_app_state(req)).status, 200)
+                response = await ShareServer(Config())._ui(mock.Mock())
+                document = response.text.split('id="saved-theme">', 1)[1].split("</script>", 1)[0]
+                self.assertEqual(json.loads(document), theme)
+                self.assertNotIn("<", document)
+                self.assertNotIn("private flag", response.text)
+
+                state_path.write_text("{invalid")
+                fallback = await server._ui(mock.Mock())
+                self.assertIn('id="saved-theme">null</script>', fallback.text)
+
     async def test_ui_asset_rev_changes_when_a_file_changes(self) -> None:
         import vice.share as share_mod
         with tempfile.TemporaryDirectory() as tmp:
